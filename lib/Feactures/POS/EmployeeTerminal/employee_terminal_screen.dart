@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'menu_models.dart';
 import 'menu_service.dart';
+import 'order_display_service.dart';
 import 'softpay_models.dart';
 import 'softpay_service.dart';
 
@@ -20,6 +21,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen> {
 
   final _softPay = SoftPayService.instance;
   final _menuService = MenuService.instance;
+  final _orderDisplay = OrderDisplayService.instance;
 
   Future<List<MenuItem>>? _menuFuture;
 
@@ -52,6 +54,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen> {
       final existing = _cart[item.id];
       _cart[item.id] = CartEntry(item: item, quantity: (existing?.quantity ?? 0) + 1);
     });
+    _syncCart();
   }
 
   void _removeFromCart(MenuItem item) {
@@ -65,6 +68,11 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen> {
         _cart[item.id] = existing.copyWith(quantity: existing.quantity - 1);
       }
     });
+    _syncCart();
+  }
+
+  void _syncCart() {
+    _orderDisplay.pushCart(cart: _cart.values.toList(), currency: _currency);
   }
 
   Future<void> _charge() async {
@@ -94,6 +102,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen> {
             : '${transaction.cardScheme} · ${_total.toStringAsFixed(2)} $_currency',
       );
       if (mounted) setState(_cart.clear);
+      _syncCart();
     } on SoftPayException catch (e) {
       if (!mounted) return;
       await _showResultDialog(success: false, title: 'Payment failed', message: e.message);

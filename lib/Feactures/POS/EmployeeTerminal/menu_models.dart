@@ -15,6 +15,13 @@ class MenuItem {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+    '_id': id,
+    'name': name,
+    'price': price,
+    'available': available,
+  };
+
   final String id;
   final String name;
   /// Major-unit price (e.g. SEK), not minor units. May include decimals.
