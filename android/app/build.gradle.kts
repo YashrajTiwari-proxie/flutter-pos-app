@@ -72,5 +72,8 @@ dependencies {
     // Nexus repo credentials configured in the root build.gradle.kts / local.properties.
     implementation("io.softpay:softpay-client:1.9.0")
 
+    // Printing is handled by the sunmi_flutter_plugin_printer Dart package (see pubspec.yaml),
+    // which brings its own com.sunmi:printerx dependency - no native printer wiring needed here.
+
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

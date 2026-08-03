@@ -27,6 +27,13 @@ class TransactionResult {
     this.cardScheme,
     this.partialPan,
     this.auditNumber,
+    this.type,
+    this.cvm,
+    this.terminalId,
+    this.batchNumber,
+    this.tipMinor,
+    this.surchargeMinor,
+    this.transactionDate,
   });
 
   factory TransactionResult.fromMap(Map<dynamic, dynamic> map) {
@@ -38,6 +45,13 @@ class TransactionResult {
       cardScheme: map['cardScheme'] as String?,
       partialPan: map['partialPan'] as String?,
       auditNumber: map['auditNumber'] as String?,
+      type: map['type'] as String?,
+      cvm: map['cvm'] as String?,
+      terminalId: map['terminalId'] as String?,
+      batchNumber: map['batchNumber'] as String?,
+      tipMinor: (map['tipMinor'] as num?)?.toInt(),
+      surchargeMinor: (map['surchargeMinor'] as num?)?.toInt(),
+      transactionDate: (map['transactionDate'] as num?)?.toInt(),
     );
   }
 
@@ -48,4 +62,11 @@ class TransactionResult {
   final String? cardScheme;
   final String? partialPan;
   final String? auditNumber;
+  final String? type;
+  final String? cvm;
+  final String? terminalId;
+  final String? batchNumber;
+  final int? tipMinor;
+  final int? surchargeMinor;
+  final int? transactionDate;
 }

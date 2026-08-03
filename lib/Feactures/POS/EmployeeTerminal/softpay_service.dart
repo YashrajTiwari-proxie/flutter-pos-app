@@ -48,6 +48,33 @@ class SoftPayService {
     }
   }
 
+  /// Processes a refund as its own card-present transaction (the connected Softpay app will
+  /// always require a card tap; there is no "linked by request id" refund). [posReferenceNumber]
+  /// is passed through only so the refund can be reconciled against the original order.
+  Future<TransactionResult> refund({
+    required int amountMinor,
+    required String currency,
+    String? posReferenceNumber,
+  }) async {
+    try {
+      final result = await _methodChannel.invokeMapMethod<Object?, Object?>('refund', {
+        'amountMinor': amountMinor,
+        'currency': currency,
+        'posReferenceNumber': posReferenceNumber,
+      });
+      return TransactionResult.fromMap(result!);
+    } on PlatformException catch (e) {
+      final details = e.details;
+      final detailedCode = details is Map ? (details['detailedCode'] as num?)?.toInt() : null;
+      throw SoftPayException(
+        code: e.code,
+        message: e.message ?? 'Unknown SoftPay error',
+        detailedCode: detailedCode,
+      );
+    }
+  }
+
+  /// Cancels whichever operation (charge or refund) is currently in flight.
   Future<void> cancelCharge() async {
     await _methodChannel.invokeMethod<void>('cancelCharge');
   }

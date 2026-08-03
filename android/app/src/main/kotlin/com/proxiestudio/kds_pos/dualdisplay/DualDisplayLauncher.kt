@@ -7,21 +7,27 @@ import android.view.Display
 
 /**
  * Detects the Sunmi D3 mini's secondary customer-facing panel and shows a
- * [CustomerDisplayPresentation] on it. Uses `DisplayManager.getDisplays
- * (DISPLAY_CATEGORY_PRESENTATION)` - the same query Sunmi's own docs recommend for this class
- * of device - rather than treating any non-default [Display] as a target, and rather than
- * launching a second Activity onto it (which requires cross-display activity-launch
- * permissions many OEMs withhold for a private customer panel, and is what crashed on-device).
+ * [CustomerDisplayPresentation] on it, rather than launching a second Activity onto it (which
+ * requires cross-display activity-launch permissions many OEMs withhold for a private customer
+ * panel, and is what crashed on-device).
  *
- * On any device without a presentation-capable secondary display (dev phone, emulator,
- * disconnected panel), this is a no-op and the app falls back to exactly the single-screen
- * behaviour it had before this feature existed.
+ * Detection matches on [Display.FLAG_PRESENTATION] - the flag Android defines specifically to
+ * mark a display as suitable for [android.app.Presentation] - via a plain scan of every
+ * [Display] rather than `DisplayManager.getDisplays(DISPLAY_CATEGORY_PRESENTATION)`, which is
+ * (per Sunmi's docs, https://docs.sunmi.com/en-US/cdixeghjk491/xfcfeghjk535) not guaranteed to
+ * agree with the real secondary panel on this hardware. Requiring `FLAG_SECURE` and
+ * `FLAG_SUPPORTS_PROTECTED_BUFFERS` in addition (as Sunmi's own older sample does) turned out to
+ * be too strict for the D3 mini and matched no display at all, which silently fell back to
+ * single-screen mode and left the customer panel mirroring the main screen instead - so this
+ * checks `FLAG_PRESENTATION` alone.
  *
- * Detection ([hasPresentationDisplay]) and actually showing the presentation
- * ([showIfAvailable]) are deliberately separate calls: detection is a cheap, side-effect-free
- * query safe to run during `configureFlutterEngine` (used to pick which SoftPay plugin to
- * attach), while showing the presentation is only attempted once the host activity has fully
- * resumed, and is never allowed to crash the app.
+ * On any device without a matching secondary display (dev phone, emulator, disconnected
+ * panel), this is a no-op and the app falls back to exactly the single-screen behaviour it had
+ * before this feature existed. Unlike `SoftPayPlugin`'s relay decision (checked live per charge
+ * attempt), showing the Presentation itself only needs to happen once a display shows up - it
+ * stays up for as long as the display is attached, so a one-time check here plus a
+ * [DisplayManager.DisplayListener] for later hot-plugs is enough; it's never allowed to crash
+ * the app.
  */
 object DualDisplayLauncher {
 
@@ -29,8 +35,6 @@ object DualDisplayLauncher {
 
     @Volatile private var currentPresentation: CustomerDisplayPresentation? = null
     private var listenerRegistered = false
-
-    fun hasPresentationDisplay(context: Context): Boolean = presentationDisplay(context) != null
 
     /** Call once the host activity is fully resumed (e.g. from `onPostResume`). */
     fun showIfAvailable(context: Context) {
@@ -45,8 +49,11 @@ object DualDisplayLauncher {
     private fun displayManager(context: Context): DisplayManager =
         context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
 
-    private fun presentationDisplay(context: Context): Display? =
-        displayManager(context).getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION).firstOrNull()
+    private fun presentationDisplay(context: Context): Display? {
+        val displays = displayManager(context).displays
+        Log.i(TAG, "Enumerating displays: ${displays.joinToString { "${it.displayId}(flags=${it.flags})" }}")
+        return displays.firstOrNull { (it.flags and Display.FLAG_PRESENTATION) != 0 }
+    }
 
     private fun registerListener(context: Context) {
         if (listenerRegistered) return

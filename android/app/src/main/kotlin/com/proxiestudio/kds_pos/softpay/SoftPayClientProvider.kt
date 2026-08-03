@@ -37,11 +37,10 @@ object SoftPayClientProvider {
     }
 
     // Deliberately always applicationContext, never an Activity context: this is a process-wide
-    // singleton (clientOrNew) shared by both the direct SoftPayPlugin (single-screen fallback)
-    // and SoftPayRelayPlugin's readiness check (dual-screen mode) - see
-    // dualdisplay/SoftPayRelayPlugin.kt. Whatever display the AppSwitch hand-off actually lands
-    // on is not controlled via this context; don't try to "fix" display targeting by threading
-    // an Activity context through here.
+    // singleton (clientOrNew) shared by the SoftPayPlugin instance on both the cashier engine
+    // and the customer-display engine (see softpay/SoftPayPlugin's class doc). Whatever display
+    // the AppSwitch hand-off actually lands on is not controlled via this context; don't try to
+    // "fix" display targeting by threading an Activity context through here.
     fun getClient(context: Context): Client =
         Softpay.clientOrNew {
             ClientOptions(context = context.applicationContext, integrator = integrator())

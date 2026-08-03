@@ -4,6 +4,8 @@ import android.app.Presentation
 import android.content.Context
 import android.os.Bundle
 import android.view.Display
+import android.view.ViewGroup
+import android.view.WindowManager
 import com.proxiestudio.kds_pos.softpay.SoftPayPlugin
 import io.flutter.FlutterInjector
 import io.flutter.embedding.android.FlutterView
@@ -32,6 +34,15 @@ class CustomerDisplayPresentation(outerContext: Context, display: Display) : Pre
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Presentation's default dialog theme doesn't reliably enable hardware acceleration on
+        // every OEM build, and the FlutterView below uses RenderMode.texture, which needs a
+        // hardware-accelerated window to actually composite frames - without this the window can
+        // come up with nothing drawn on it at all.
+        window?.setFlags(
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+        )
+
         val loader = FlutterInjector.instance().flutterLoader()
         if (!loader.initialized()) {
             loader.startInitialization(context.applicationContext)
@@ -46,7 +57,10 @@ class CustomerDisplayPresentation(outerContext: Context, display: Display) : Pre
                 "customerDisplayMain",
             ),
         )
-        engine.plugins.add(SoftPayPlugin())
+        // allowRelay = false: this engine is itself what DisplayBridge.isCustomerAttached()
+        // reports as attached, so a relay-checking instance here would try to relay a charge to
+        // itself. See SoftPayPlugin's class doc.
+        engine.plugins.add(SoftPayPlugin(allowRelay = false))
         engine.plugins.add(DisplayBridgePlugin(DisplayBridgeRole.CUSTOMER))
         engine.lifecycleChannel.appIsResumed()
         this.engine = engine
@@ -54,7 +68,11 @@ class CustomerDisplayPresentation(outerContext: Context, display: Display) : Pre
         val view = FlutterView(context, RenderMode.texture)
         view.attachToFlutterEngine(engine)
         flutterView = view
-        setContentView(view)
+        // Presentation.setContentView(View) (no LayoutParams) does not reliably fill the window
+        // on every OEM build - without explicit MATCH_PARENT params the FlutterView can collapse
+        // to a zero/wrap-content size, leaving only the window's own background visible (which
+        // reads as "the background color shows but nothing else does").
+        setContentView(view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 
     override fun onDisplayRemoved() {
