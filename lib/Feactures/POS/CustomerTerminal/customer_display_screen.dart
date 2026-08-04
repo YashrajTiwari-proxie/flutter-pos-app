@@ -90,12 +90,26 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.black,
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(32),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Debug marker: a hardcoded-color banner independent of Theme.of(context), so it
+              // stays visible even if theme/text-style resolution is somehow the problem.
+              Container(
+                width: double.infinity,
+                color: Colors.limeAccent,
+                padding: const EdgeInsets.all(12),
+                child: const Text(
+                  'CUSTOMER DISPLAY TEST',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.black, fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(height: 16),
               Text('Your order', style: Theme.of(context).textTheme.headlineMedium),
               const SizedBox(height: 16),
               Expanded(

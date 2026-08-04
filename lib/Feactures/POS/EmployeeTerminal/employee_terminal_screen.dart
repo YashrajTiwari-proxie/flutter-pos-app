@@ -249,6 +249,23 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen> {
     );
   }
 
+  bool _activatingSecondaryDisplay = false;
+
+  Future<void> _activateSecondaryDisplay() async {
+    setState(() => _activatingSecondaryDisplay = true);
+    try {
+      final connected = await _orderDisplay.activateSecondaryDisplay();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(connected ? 'Secondary display connected' : 'No secondary display found'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _activatingSecondaryDisplay = false);
+    }
+  }
+
   @override
   void dispose() {
     _statusSubscription?.cancel();
@@ -263,6 +280,13 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen> {
       appBar: AppBar(
         title: const Text('Employee Terminal'),
         actions: [
+          IconButton(
+            onPressed: _activatingSecondaryDisplay ? null : _activateSecondaryDisplay,
+            icon: _activatingSecondaryDisplay
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.connected_tv),
+            tooltip: 'Connect secondary display',
+          ),
           IconButton(
             onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const OrdersScreen())),
             icon: const Icon(Icons.receipt_long),

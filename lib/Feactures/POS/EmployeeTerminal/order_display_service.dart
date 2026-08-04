@@ -18,4 +18,12 @@ class OrderDisplayService {
       'items': cart.map((entry) => {...entry.item.toJson(), 'quantity': entry.quantity}).toList(),
     });
   }
+
+  /// Explicitly (re)triggers detecting and showing the customer-display Presentation, rather
+  /// than relying on it happening automatically at app startup - see DualDisplayLauncher's class
+  /// doc. Returns true if the customer display is now showing.
+  Future<bool> activateSecondaryDisplay() async {
+    final result = await _methodChannel.invokeMethod<bool>('activateSecondaryDisplay');
+    return result ?? false;
+  }
 }

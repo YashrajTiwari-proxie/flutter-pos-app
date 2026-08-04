@@ -36,7 +36,6 @@ dependencies:
   cupertino_icons: ^1.0.8
   convex_flutter: ^3.0.1
   sunmi_flutter_plugin_printer: ^1.0.7+7
-
 dev_dependencies:
   flutter_test:
     sdk: flutter

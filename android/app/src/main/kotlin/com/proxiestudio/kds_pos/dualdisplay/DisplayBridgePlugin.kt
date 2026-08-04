@@ -1,5 +1,6 @@
 package com.proxiestudio.kds_pos.dualdisplay
 
+import android.content.Context
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -8,18 +9,21 @@ import io.flutter.plugin.common.MethodChannel
 enum class DisplayBridgeRole { MAIN, CUSTOMER }
 
 /**
- * Thin per-engine adapter over [DisplayBridge]. `MAIN` runs on the cashier engine and only
- * needs to push cart snapshots down to the customer engine. `CUSTOMER` runs on the
- * customer-display engine: it receives cart/charge/cancel events from the cashier side and
- * reports payment status/results back up.
+ * Thin per-engine adapter over [DisplayBridge]. `MAIN` runs on the cashier engine and pushes
+ * cart snapshots down to the customer engine, plus exposes a manual `activateSecondaryDisplay`
+ * trigger (see [DualDisplayLauncher]). `CUSTOMER` runs on the customer-display engine: it
+ * receives cart/charge/cancel events from the cashier side and reports payment status/results
+ * back up.
  */
 class DisplayBridgePlugin(private val role: DisplayBridgeRole) :
     FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
 
     private var methodChannel: MethodChannel? = null
     private var eventChannel: EventChannel? = null
+    private lateinit var appContext: Context
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        appContext = binding.applicationContext
         when (role) {
             DisplayBridgeRole.MAIN -> {
                 methodChannel = MethodChannel(binding.binaryMessenger, "com.proxiestudio.kds_pos/orderdisplay")
@@ -69,6 +73,9 @@ class DisplayBridgePlugin(private val role: DisplayBridgeRole) :
                 val cart = call.arguments as? Map<String, Any?> ?: emptyMap()
                 DisplayBridge.pushCart(cart)
                 result.success(null)
+            }
+            "activateSecondaryDisplay" -> {
+                result.success(DualDisplayLauncher.activate(appContext))
             }
             else -> result.notImplemented()
         }
