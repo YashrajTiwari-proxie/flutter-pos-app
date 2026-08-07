@@ -18,10 +18,13 @@ class OrdersScreen extends StatefulWidget {
   State<OrdersScreen> createState() => _OrdersScreenState();
 }
 
+enum _OrderFilter { all, pending, completed, failed, refunded }
+
 class _OrdersScreenState extends State<OrdersScreen> {
   SubscriptionHandle? _subscription;
   List<Order>? _orders;
   String? _error;
+  _OrderFilter _filter = _OrderFilter.all;
 
   // Presence of a key means that order's refund is in flight; the value is the latest terminal
   // status update for it, if any has arrived yet.
@@ -169,12 +172,50 @@ class _OrdersScreenState extends State<OrdersScreen> {
     );
   }
 
+  bool _matchesFilter(Order order) {
+    switch (_filter) {
+      case _OrderFilter.all:
+        return true;
+      case _OrderFilter.pending:
+        return order.status == OrderStatus.processing;
+      case _OrderFilter.completed:
+        return order.status == OrderStatus.paid;
+      case _OrderFilter.failed:
+        return order.status == OrderStatus.failed;
+      case _OrderFilter.refunded:
+        return order.status == OrderStatus.refunded || order.status == OrderStatus.partiallyRefunded;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surfaceContainerLowest,
-      appBar: AppBar(title: const Text('Orders')),
-      body: _buildBody(context),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.arrow_back_rounded),
+                    tooltip: 'Back',
+                  ),
+                  const SizedBox(width: 8),
+                  Text('Orders', style: Theme.of(context).textTheme.headlineSmall),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _FilterRow(selected: _filter, onSelected: (filter) => setState(() => _filter = filter)),
+              const SizedBox(height: 16),
+              Expanded(child: _buildBody(context)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -192,28 +233,62 @@ class _OrdersScreenState extends State<OrdersScreen> {
       return const EmptyState(icon: Icons.receipt_long_outlined, message: 'No orders yet');
     }
 
+    final filtered = orders.where(_matchesFilter).toList();
     final anyRefundInProgress = _refunding.isNotEmpty;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (_error != null) _ReconnectBanner(message: _error!, onRetry: _subscribe),
         Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            itemCount: orders.length,
-            itemBuilder: (context, index) {
-              final order = orders[index];
-              return _OrderCard(
-                order: order,
-                isRefunding: _refunding.containsKey(order.id),
-                refundStatus: _refunding[order.id],
-                refundEnabled: !anyRefundInProgress,
-                onRefund: () => _refund(order),
-                isPrinting: _printingOrderIds.contains(order.id),
-                onPrint: () => _printReceipt(order),
-              );
-            },
-          ),
+          child: filtered.isEmpty
+              ? const EmptyState(icon: Icons.filter_alt_off_outlined, message: 'No orders match this filter')
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: filtered.length,
+                  itemBuilder: (context, index) {
+                    final order = filtered[index];
+                    return _OrderCard(
+                      order: order,
+                      isRefunding: _refunding.containsKey(order.id),
+                      refundStatus: _refunding[order.id],
+                      refundEnabled: !anyRefundInProgress,
+                      onRefund: () => _refund(order),
+                      isPrinting: _printingOrderIds.contains(order.id),
+                      onPrint: () => _printReceipt(order),
+                    );
+                  },
+                ),
         ),
+      ],
+    );
+  }
+}
+
+class _FilterRow extends StatelessWidget {
+  const _FilterRow({required this.selected, required this.onSelected});
+
+  final _OrderFilter selected;
+  final ValueChanged<_OrderFilter> onSelected;
+
+  static const _labels = {
+    _OrderFilter.all: 'All',
+    _OrderFilter.pending: 'Pending',
+    _OrderFilter.completed: 'Completed',
+    _OrderFilter.failed: 'Failed',
+    _OrderFilter.refunded: 'Refunded',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      children: [
+        for (final filter in _OrderFilter.values)
+          ChoiceChip(
+            label: Text(_labels[filter]!),
+            selected: selected == filter,
+            onSelected: (_) => onSelected(filter),
+          ),
       ],
     );
   }
@@ -284,28 +359,34 @@ class _OrderCard extends StatelessWidget {
     return '${_months[local.month - 1]} ${local.day} · $hour:$minute $period';
   }
 
-  (IconData, Color, Color) _statusStyle(BuildContext context) {
+  // A plain foreground color per status - the tag background is a tint of this same color
+  // (see _StatusTag), the same "colored icon/text on a light tint of that color" pattern used
+  // elsewhere in the app (DishTile, cart-line avatars). Deliberately NOT scheme.*Container:
+  // this theme's ColorScheme never sets primaryContainer/secondaryContainer/errorContainer/
+  // tertiaryContainer, so they silently fall back to the same color as their "on" counterpart -
+  // which is exactly the foreground color used here, making the tag's text invisible against
+  // its own background.
+  Color _statusColor(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     switch (order.status) {
       case OrderStatus.paid:
-        return (Icons.check_circle, scheme.primary, scheme.primaryContainer);
+        return scheme.primary;
       case OrderStatus.failed:
-        return (Icons.error, scheme.error, scheme.errorContainer);
+        return scheme.error;
       case OrderStatus.cancelled:
-        return (Icons.block, scheme.onSurfaceVariant, scheme.surfaceContainerHighest);
+        return scheme.onSurfaceVariant;
       case OrderStatus.refunded:
-        return (Icons.undo, scheme.tertiary, scheme.tertiaryContainer);
       case OrderStatus.partiallyRefunded:
-        return (Icons.undo, scheme.tertiary, scheme.tertiaryContainer);
+        return scheme.tertiary;
       case OrderStatus.processing:
-        return (Icons.hourglass_top, scheme.secondary, scheme.secondaryContainer);
+        return scheme.secondary;
     }
   }
 
   String _statusLabel() {
     switch (order.status) {
       case OrderStatus.processing:
-        return 'Processing';
+        return 'Pending';
       case OrderStatus.paid:
         return 'Paid';
       case OrderStatus.failed:
@@ -338,50 +419,43 @@ class _OrderCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final itemSummary = order.items.map((item) => '${item.quantity}× ${item.name}').join(', ');
+    final scheme = Theme.of(context).colorScheme;
     final payment = order.payment;
-    final (statusIcon, statusColor, statusBackground) = _statusStyle(context);
+    final statusColor = _statusColor(context);
 
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      elevation: 0,
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Flexible(
-                  child: Chip(
-                    avatar: Icon(statusIcon, size: 18, color: statusColor),
-                    label: Text(_statusLabel(), overflow: TextOverflow.ellipsis),
-                    backgroundColor: statusBackground,
-                    visualDensity: VisualDensity.compact,
-                    side: BorderSide.none,
+                Expanded(
+                  child: Text(
+                    _formatTimestamp(order.createdAt),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                   ),
                 ),
                 const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    _formatMinor(order.totalMinor, order.currency),
-                    textAlign: TextAlign.end,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
+                _StatusTag(label: _statusLabel(), color: statusColor),
               ],
             ),
-            const SizedBox(height: 8),
-            Text(itemSummary, style: Theme.of(context).textTheme.bodyMedium),
-            const SizedBox(height: 4),
-            Text(
-              _formatTimestamp(order.createdAt),
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
-            ),
+            const SizedBox(height: 12),
+            for (final item in order.items)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text('${item.quantity}× ${item.name}', style: Theme.of(context).textTheme.bodyMedium),
+                    ),
+                    Text(_formatMinor(item.subtotalMinor, order.currency), style: Theme.of(context).textTheme.bodyMedium),
+                  ],
+                ),
+              ),
             if (payment?.cardScheme != null) ...[
               const SizedBox(height: 4),
               Text(
@@ -395,14 +469,27 @@ class _OrderCard extends StatelessWidget {
             if (order.failure != null) ...[
               const SizedBox(height: 4),
               Text(
-                'Failed: ${friendlySoftPayMessage(order.failure!.message)}',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+                friendlySoftPayMessage(order.failure!.message),
+                style: TextStyle(color: scheme.error, fontWeight: FontWeight.w600),
               ),
             ],
             if (order.refund != null) ...[
               const SizedBox(height: 4),
               Text('Refunded: ${_formatMinor(order.refund!.amountMinor, order.currency)}'),
             ],
+            const SizedBox(height: 12),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Total', style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                  _formatMinor(order.totalMinor, order.currency),
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
             if (isRefunding) ...[
               const SizedBox(height: 12),
               Row(
@@ -415,7 +502,6 @@ class _OrderCard extends StatelessWidget {
             ] else if (order.canRefund || order.payment != null) ...[
               const SizedBox(height: 12),
               Row(
-                mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   if (order.payment != null)
                     isPrinting
@@ -423,22 +509,43 @@ class _OrderCard extends StatelessWidget {
                             padding: EdgeInsets.symmetric(horizontal: 12),
                             child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
                           )
-                        : IconButton(
+                        : OutlinedButton.icon(
                             onPressed: onPrint,
-                            icon: const Icon(Icons.print_outlined),
-                            tooltip: 'Print receipt',
+                            icon: const Icon(Icons.print_outlined, size: 18),
+                            label: const Text('Print receipt'),
                           ),
-                  if (order.canRefund)
+                  if (order.canRefund) ...[
+                    const SizedBox(width: 12),
                     OutlinedButton.icon(
                       onPressed: refundEnabled ? onRefund : null,
                       icon: const Icon(Icons.undo, size: 18),
                       label: const Text('Refund'),
                     ),
+                  ],
                 ],
               ),
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _StatusTag extends StatelessWidget {
+  const _StatusTag({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(color: color.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(20)),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelMedium?.copyWith(color: color, fontWeight: FontWeight.w700),
       ),
     );
   }

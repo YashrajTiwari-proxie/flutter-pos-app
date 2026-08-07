@@ -49,6 +49,17 @@ String friendlySoftPayMessage(String rawMessage) {
   return _knownSoftPayMessages[identifier] ?? _humanizeIdentifier(identifier);
 }
 
+/// Turns a raw Softpay SDK processing-phase identifier (e.g. "PROCESSING_KERNEL", emitted via
+/// `onProcessing` while a charge is in flight) into a short human phrase (e.g. "Processing
+/// Kernel"). Unlike [friendlySoftPayMessage] there's no `(code)` suffix to strip - these are
+/// bare SCREAMING_SNAKE_CASE phase names, not failure identifiers - so this only humanizes
+/// strings that actually look like one; anything else (already human-readable SDK text) passes
+/// through unchanged.
+String friendlySoftPayProcessingUpdate(String raw) {
+  if (!RegExp(r'^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$').hasMatch(raw)) return raw;
+  return _humanizeIdentifier(raw);
+}
+
 String _humanizeIdentifier(String identifier) {
   return identifier
       .split('_')

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:kds_pos/Core/theme/theme_controller.dart';
 
 import 'customer_app.dart';
 
@@ -7,7 +8,7 @@ import 'customer_app.dart';
 /// the Convex client - this screen only ever displays data relayed over the native
 /// `DisplayBridge`, it never queries the backend directly.
 @pragma('vm:entry-point')
-void customerDisplayMain() {
+Future<void> customerDisplayMain() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // In release builds, a widget that throws during build is normally replaced by a plain grey
@@ -29,5 +30,9 @@ void customerDisplayMain() {
     ),
   );
 
+  // This engine has its own ThemeController instance (separate isolate from the cashier
+  // engine's), but both read/write the same SharedPreferences-backed storage - loading here
+  // picks up whatever the cashier last chose in Settings > Appearance.
+  await ThemeController.instance.load();
   runApp(const CustomerDisplayApp());
 }

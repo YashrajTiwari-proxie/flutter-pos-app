@@ -26,6 +26,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        resValues = true
     }
 
     defaultConfig {
@@ -43,6 +44,28 @@ android {
         buildConfigField("String", "SOFTPAY_INTEGRATOR_SECRET", "\"${softpayProperty("SOFTPAY_INTEGRATOR_SECRET", "e8337ccce2db45b6be203918944f3fc8")}\"")
         buildConfigField("String", "SOFTPAY_MERCHANT_NAME", "\"${softpayProperty("SOFTPAY_MERCHANT_NAME", "YourMerchantName")}\"")
         buildConfigField("String", "SOFTPAY_TARGET", "\"${softpayProperty("SOFTPAY_TARGET", "sandbox")}\"")
+    }
+
+    // Three build targets sharing this one codebase - see lib/app.dart's APP_MODE dart-define,
+    // which must be passed to match the flavor being built (e.g. `--flavor kiosk
+    // --dart-define=APP_MODE=kiosk`). Distinct applicationIdSuffix/app_name per flavor so all
+    // three can be installed side by side on the same device during development.
+    flavorDimensions += "mode"
+    productFlavors {
+        create("pos") {
+            dimension = "mode"
+            resValue("string", "app_name", "NorrOne POS")
+        }
+        create("kiosk") {
+            dimension = "mode"
+            applicationIdSuffix = ".kiosk"
+            resValue("string", "app_name", "NorrOne Kiosk")
+        }
+        create("display") {
+            dimension = "mode"
+            applicationIdSuffix = ".display"
+            resValue("string", "app_name", "NorrOne Display")
+        }
     }
 
     buildTypes {
