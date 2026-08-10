@@ -1,9 +1,19 @@
 import 'dart:async';
 
+import 'package:convex_flutter/convex_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:kds_pos/Core/connectivity/connectivity_service.dart';
 import 'package:kds_pos/Core/navigation/route_observer.dart';
+import 'package:kds_pos/Database/cart_reconciliation.dart';
+import 'package:kds_pos/Database/device_identity_service.dart';
+import 'package:kds_pos/Database/models/cart_entry.dart';
+import 'package:kds_pos/Database/models/menu_category.dart';
+import 'package:kds_pos/Database/models/menu_item.dart';
+import 'package:kds_pos/Database/models/menu_item_addon.dart';
+import 'package:kds_pos/Database/repositories/menu_repository.dart';
+import 'package:kds_pos/Database/repositories/order_repository.dart';
 import 'package:kds_pos/Feactures/POS/Settings/settings_screen.dart';
+import 'package:kds_pos/Widgets/addon_picker_sheet.dart';
 import 'package:kds_pos/Widgets/app_header_bar.dart';
 import 'package:kds_pos/Widgets/app_sidebar.dart';
 import 'package:kds_pos/Widgets/category_tab_bar.dart';
@@ -11,17 +21,15 @@ import 'package:kds_pos/Widgets/connectivity_banner.dart';
 import 'package:kds_pos/Widgets/dish_tile.dart';
 import 'package:kds_pos/Widgets/order_type_pills.dart';
 import 'package:kds_pos/Widgets/payment_status_panel.dart';
+import 'package:uuid/uuid.dart';
 
 import 'error_state.dart';
-import 'menu_models.dart';
-import 'menu_service.dart';
 import 'order_display_service.dart';
-import 'order_models.dart';
-import 'order_service.dart';
 import 'orders_screen.dart';
 import 'printer_service.dart';
 import 'softpay_models.dart';
 import 'softpay_service.dart';
+import 'softpay_transaction_mapper.dart';
 
 class EmployeeTerminalScreen extends StatefulWidget {
   const EmployeeTerminalScreen({super.key});
@@ -32,13 +40,14 @@ class EmployeeTerminalScreen extends StatefulWidget {
 
 class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     with RouteAware {
-  // Sandbox test store/terminal (Norrspect) is configured for SEK.
+  // Every restaurant on this backend is Swedish (see admin-panel-v2's
+  // stockholmTime.ts) — orders carry no currency field of their own.
   static const _currency = 'SEK';
 
   final _softPay = SoftPayService.instance;
-  final _menuService = MenuService.instance;
+  final _menuRepository = MenuRepository.instance;
   final _orderDisplay = OrderDisplayService.instance;
-  final _orders = OrderService.instance;
+  final _orders = OrderRepository.instance;
   final _printer = PrinterService.instance;
   final _searchController = TextEditingController();
   // Owns focus for every focusable field on this screen (search field, cart-note fields) so
@@ -46,30 +55,40 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   // Navigator itself manages - see didPopNext below for why that distinction matters.
   final _screenFocusScope = FocusScopeNode();
 
-  Future<List<MenuItem>>? _menuFuture;
+  List<MenuCategory>? _categories;
+  String? _menuError;
+  SubscriptionHandle? _menuSubscription;
 
-  // Keyed by MenuItem.id, insertion order preserved for a stable cart display.
+  // Keyed by CartEntry.cartKey, insertion order preserved for a stable cart display.
   final Map<String, CartEntry> _cart = {};
-  // Decorative per-line notes (see class doc on OrderTypePills) - local UI state only, not
-  // sent to Convex since orders have no notes field yet.
-  final Map<String, String> _notes = {};
 
   String _searchQuery = '';
+  OrderType _orderType = OrderType.dineIn;
 
   StreamSubscription<PaymentStatusUpdate>? _statusSubscription;
   PaymentPanelStage? _paymentStage;
   String? _paymentDetail;
   String? _activeAmountLabel;
-  List<OrderItem>? _lastOrderItems;
+  List<CartEntry>? _lastOrderItems;
   TransactionResult? _lastTransaction;
   bool _isPrinting = false;
 
-  bool get _isBusy => _paymentStage != null;
+  // _paymentStage alone isn't set until partway through `_charge()` (after the connectivity
+  // check, delivery-postal-code prompt, and order-creation await all already happened) - a
+  // rapid double-tap on Pay during that window would pass a guard based on _paymentStage alone
+  // twice, creating two separate orders (each with its own fresh idempotencyKey, so Convex's
+  // idempotency check doesn't catch it either) and firing two real SoftPay charges. This flag is
+  // set synchronously as the very first thing `_charge()` does, before any `await`, so no
+  // re-entrant call can ever slip through the gap - Dart only yields to another event at an
+  // `await`, never mid-synchronous-block.
+  bool _isChargeInFlight = false;
+
+  bool get _isBusy => _paymentStage != null || _isChargeInFlight;
 
   @override
   void initState() {
     super.initState();
-    _loadMenu();
+    _subscribeMenu();
   }
 
   @override
@@ -89,51 +108,106 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     _screenFocusScope.unfocus();
   }
 
-  void _loadMenu() {
-    setState(() {
-      _menuFuture = _menuService.fetchMenuItems();
-    });
+  Future<void> _subscribeMenu() async {
+    _menuSubscription?.cancel();
+    try {
+      _menuSubscription = await _menuRepository.subscribeToMenu(
+        onUpdate: (categories) {
+          if (!mounted) return;
+          final reconciled = reconcileCartWithMenu(_cart, categories);
+          setState(() {
+            _categories = categories;
+            _menuError = null;
+            _cart
+              ..clear()
+              ..addAll(reconciled.cart);
+          });
+          if (reconciled.removedItemNames.isNotEmpty) {
+            _syncCart();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'No longer available, removed from the order: ${reconciled.removedItemNames.join(', ')}',
+                ),
+              ),
+            );
+          }
+        },
+        onError: (message, _) {
+          if (mounted) {
+            setState(
+              () => _menuError = friendlyErrorMessage(
+                message,
+                action: 'loading the menu',
+              ),
+            );
+          }
+        },
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () =>
+              _menuError = friendlyErrorMessage(e, action: 'loading the menu'),
+        );
+      }
+    }
   }
 
-  double get _total =>
-      _cart.values.fold(0, (sum, entry) => sum + entry.subtotal);
+  int get _totalCents =>
+      _cart.values.fold(0, (sum, entry) => sum + entry.subtotalCents);
 
-  int get _totalMinor => (_total * 100).round();
-
-  void _addToCart(MenuItem item) {
+  Future<void> _addToCart(MenuItem item) async {
     if (_isBusy) return;
+    var selectedAddons = const <MenuItemAddon>[];
+    if (item.addons.isNotEmpty) {
+      final picked = await showAddonPickerSheet(context, item: item);
+      if (picked == null) return; // Dismissed without confirming.
+      selectedAddons = picked;
+    }
+    final draft = CartEntry(
+      item: item,
+      quantity: 1,
+      selectedAddons: selectedAddons,
+    );
     setState(() {
-      final existing = _cart[item.id];
-      _cart[item.id] = CartEntry(
-        item: item,
+      final existing = _cart[draft.cartKey];
+      _cart[draft.cartKey] = draft.copyWith(
         quantity: (existing?.quantity ?? 0) + 1,
+        note: existing?.note,
       );
     });
     _syncCart();
   }
 
-  void _removeFromCart(MenuItem item) {
+  void _incrementLine(CartEntry entry) {
+    if (_isBusy) return;
+    setState(
+      () => _cart[entry.cartKey] = entry.copyWith(quantity: entry.quantity + 1),
+    );
+    _syncCart();
+  }
+
+  void _decrementLine(CartEntry entry) {
     if (_isBusy) return;
     setState(() {
-      final existing = _cart[item.id];
-      if (existing == null) return;
-      if (existing.quantity <= 1) {
-        _cart.remove(item.id);
-        _notes.remove(item.id);
+      if (entry.quantity <= 1) {
+        _cart.remove(entry.cartKey);
       } else {
-        _cart[item.id] = existing.copyWith(quantity: existing.quantity - 1);
+        _cart[entry.cartKey] = entry.copyWith(quantity: entry.quantity - 1);
       }
     });
     _syncCart();
   }
 
-  void _removeLine(MenuItem item) {
+  void _removeLine(CartEntry entry) {
     if (_isBusy) return;
-    setState(() {
-      _cart.remove(item.id);
-      _notes.remove(item.id);
-    });
+    setState(() => _cart.remove(entry.cartKey));
     _syncCart();
+  }
+
+  void _setNote(CartEntry entry, String note) {
+    setState(() => _cart[entry.cartKey] = entry.copyWith(note: note));
   }
 
   void _syncCart() {
@@ -164,16 +238,54 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       ),
     );
     if (confirmed != true) return;
-    setState(() {
-      _cart.clear();
-      _notes.clear();
-    });
+    setState(() => _cart.clear());
     _syncCart();
   }
 
-  Future<void> _charge() async {
-    if (_totalMinor <= 0 || _isBusy) return;
+  /// Delivery orders need a postal code (`orders:createDeviceOrder` rejects
+  /// one without it) — prompted here rather than always shown, since
+  /// Dine In/To Go never need it.
+  Future<String?> _promptDeliveryPostalCode() {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delivery postal code'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'e.g. 11122'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = controller.text.trim();
+              if (value.isEmpty) return;
+              Navigator.of(dialogContext).pop(value);
+            },
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+  }
 
+  Future<void> _charge() async {
+    if (_totalCents <= 0 || _isBusy) return;
+    _isChargeInFlight =
+        true; // Set synchronously, before any await - see the flag's doc comment.
+    try {
+      await _runCharge();
+    } finally {
+      _isChargeInFlight = false;
+    }
+  }
+
+  Future<void> _runCharge() async {
     // The continuous ConnectivityService already keeps ConnectivityBanner live for the whole
     // session (including mid-charge), but that's a background signal that can be a few seconds
     // stale - force one more fresh check right at the moment of starting a charge, on top of
@@ -192,7 +304,47 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       return;
     }
 
-    final amountLabel = '${_total.toStringAsFixed(2)} $_currency';
+    String? deliveryPostalCode;
+    if (_orderType == OrderType.delivery) {
+      deliveryPostalCode = await _promptDeliveryPostalCode();
+      if (deliveryPostalCode == null) return; // Cancelled the prompt.
+    }
+
+    final cartSnapshot = _cart.values.toList();
+
+    // The order must be created (and its server-computed total known) BEFORE charging anything -
+    // that server total, never this screen's own cart sum, is what gets passed to
+    // SoftPayService.charge() below. If Convex can't be reached at all, we do not fall back to
+    // charging the client-computed total: that would let a stale cached price, a coupon-math
+    // mismatch, or a patched client charge the wrong amount with nothing server-side able to
+    // catch it after the fact. Better to block the till for one sale than risk that.
+    final String orderId;
+    final int chargeAmountCents;
+    try {
+      final result = await _orders.createOrder(
+        idempotencyKey: const Uuid().v4(),
+        items: cartSnapshot.map((entry) => entry.toDeviceCartItem()).toList(),
+        fulfillmentType: 'asap',
+        orderType: _orderType.backendValue,
+        paymentMethod: 'card',
+        deliveryPostalCode: deliveryPostalCode,
+        customerName: 'Walk-in',
+      );
+      orderId = result.orderId;
+      chargeAmountCents = result.totalCents;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(friendlyErrorMessage(e, action: 'saving this order')),
+          ),
+        );
+      }
+      return;
+    }
+
+    final amountLabel =
+        '${(chargeAmountCents / 100).toStringAsFixed(2)} $_currency';
     setState(() {
       _paymentStage = PaymentPanelStage.connecting;
       _paymentDetail = null;
@@ -206,59 +358,28 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
           // While processing, the SDK reports its raw internal phase name (e.g.
           // "PROCESSING_KERNEL") rather than a customer-facing message - humanize it here
           // rather than showing that technical string as-is.
-          _paymentDetail = update.stage == PaymentStage.processing && update.detail != null
+          _paymentDetail =
+              update.stage == PaymentStage.processing && update.detail != null
               ? friendlySoftPayProcessingUpdate(update.detail!)
               : update.detail;
         });
       }
     });
 
-    final orderItems = _cart.values
-        .map(
-          (entry) => OrderItem(
-            menuItemId: entry.item.id,
-            name: entry.item.name,
-            priceMinor: (entry.item.price * 100).round(),
-            quantity: entry.quantity,
-          ),
-        )
-        .toList();
-
-    // Record the order before charging so failed/cancelled payments are tracked too, not just
-    // successful ones. If Convex is unreachable we still let the charge proceed - losing order
-    // tracking for one sale is better than blocking the till.
-    String? orderId;
-    try {
-      orderId = await _orders.createOrder(
-        currency: _currency,
-        totalMinor: _totalMinor,
-        items: orderItems,
-      );
-    } catch (e) {
-      orderId = null;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(friendlyErrorMessage(e, action: 'saving this order')),
-          ),
-        );
-      }
-    }
-
     try {
       final transaction = await _softPay.charge(
-        amountMinor: _totalMinor,
+        amountMinor: chargeAmountCents,
         currency: _currency,
       );
-      if (orderId != null) {
-        unawaited(
-          _orders.recordPaymentSuccess(
-            orderId: orderId,
-            transaction: transaction,
-          ),
-        );
-      }
-      _lastOrderItems = orderItems;
+      // Awaited (not fire-and-forget) so the report is durably queued to disk - see
+      // OrderEventOutbox - before this screen moves on. The charge already happened; losing
+      // this report to an app kill in the next few milliseconds would leave Convex never
+      // learning the card was charged.
+      await _orders.recordPaymentSuccess(
+        orderId: orderId,
+        transaction: toTransactionSnapshot(transaction),
+      );
+      _lastOrderItems = cartSnapshot;
       _lastTransaction = transaction;
       if (mounted) {
         setState(() {
@@ -267,23 +388,29 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
               ? amountLabel
               : '${transaction.cardScheme} · $amountLabel';
           _cart.clear();
-          _notes.clear();
         });
       }
       _syncCart();
     } on SoftPayException catch (e) {
-      if (orderId != null) {
-        unawaited(
-          e.code == 'CANCELLED'
-              ? _orders.recordCancellation(orderId: orderId)
-              : _orders.recordPaymentFailure(
-                  orderId: orderId,
-                  code: e.code,
-                  message: e.message,
-                  detailedCode: e.detailedCode,
-                ),
-        );
-      }
+      // TRANSACTION_INCOMPLETE means the SDK itself couldn't determine whether the charge went
+      // through - recorded as its own "unconfirmed" state (never "failed", which would risk a
+      // double-charge on retry if it actually succeeded) for staff to reconcile manually.
+      final isUnconfirmed = e.code == 'TRANSACTION_INCOMPLETE';
+      await (e.code == 'CANCELLED'
+          ? _orders.recordCancellation(orderId: orderId)
+          : isUnconfirmed
+          ? _orders.recordPaymentUnconfirmed(
+              orderId: orderId,
+              code: e.code,
+              message: e.message,
+              detailedCode: e.detailedCode,
+            )
+          : _orders.recordPaymentFailure(
+              orderId: orderId,
+              code: e.code,
+              message: e.message,
+              detailedCode: e.detailedCode,
+            ));
       if (mounted) {
         setState(() {
           _paymentStage = e.code == 'CANCELLED'
@@ -332,11 +459,22 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     setState(() => _isPrinting = true);
     try {
       await _printer.printReceipt(
-        items: items,
+        items: items
+            .map(
+              (entry) => ReceiptLine(
+                name: entry.item.name,
+                quantity: entry.quantity,
+                subtotalCents: entry.subtotalCents,
+              ),
+            )
+            .toList(),
         currency: _currency,
-        totalMinor: transaction.amountMinor,
+        totalCents: transaction.amountMinor,
         cardScheme: transaction.cardScheme,
         partialPan: transaction.partialPan,
+        logoBytes: DeviceIdentityService.instance.logoBytes,
+        headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
+        footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
       );
     } on PrinterException catch (e) {
       if (mounted) {
@@ -395,15 +533,21 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     routeObserver.unsubscribe(this);
     _screenFocusScope.dispose();
     _statusSubscription?.cancel();
+    _menuSubscription?.cancel();
     _searchController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final quantities = {
-      for (final entry in _cart.values) entry.item.id: entry.quantity,
-    };
+    // Summed across every addon-combo line for the same item, so the
+    // DishTile badge reflects "how many of this dish total", not just one
+    // specific combo's count.
+    final quantities = <String, int>{};
+    for (final entry in _cart.values) {
+      quantities[entry.item.id] =
+          (quantities[entry.item.id] ?? 0) + entry.quantity;
+    }
     return Scaffold(
       // This is a fixed tablet layout (sidebar + menu + cart panel filling the screen) - the
       // keyboard opening for the search field or a cart note should overlay it, not force the
@@ -450,8 +594,6 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                                     setState(() => _searchQuery = value),
                               ),
                               const SizedBox(height: 20),
-                              const CategoryTabBar(),
-                              const SizedBox(height: 20),
                               Row(
                                 children: [
                                   Expanded(
@@ -463,20 +605,21 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                                     ),
                                   ),
                                   IconButton(
-                                    onPressed: _loadMenu,
+                                    onPressed: _subscribeMenu,
                                     icon: const Icon(Icons.refresh_rounded),
-                                    tooltip: 'Refresh menu',
+                                    tooltip: 'Reconnect menu',
                                   ),
                                 ],
                               ),
                               const SizedBox(height: 12),
                               Expanded(
                                 child: _MenuPanel(
-                                  future: _menuFuture,
+                                  categories: _categories,
+                                  error: _menuError,
                                   quantities: quantities,
                                   onTap: _addToCart,
                                   enabled: !_isBusy,
-                                  onRetry: _loadMenu,
+                                  onRetry: _subscribeMenu,
                                   searchQuery: _searchQuery,
                                 ),
                               ),
@@ -491,21 +634,22 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                               padding: const EdgeInsets.all(20),
                               child: _OrderPanel(
                                 cart: _cart.values.toList(),
-                                notes: _notes,
-                                total: _total,
+                                totalCents: _totalCents,
                                 currency: _currency,
                                 isBusy: _isBusy,
+                                orderType: _orderType,
+                                onOrderTypeChanged: (type) =>
+                                    setState(() => _orderType = type),
                                 paymentStage: _paymentStage,
                                 paymentDetail: _paymentDetail,
                                 amountLabel:
                                     _activeAmountLabel ??
-                                    '${_total.toStringAsFixed(2)} $_currency',
+                                    '${(_totalCents / 100).toStringAsFixed(2)} $_currency',
                                 isPrinting: _isPrinting,
-                                onIncrement: _addToCart,
-                                onDecrement: _removeFromCart,
+                                onIncrement: _incrementLine,
+                                onDecrement: _decrementLine,
                                 onRemoveLine: _removeLine,
-                                onNoteChanged: (item, note) =>
-                                    setState(() => _notes[item.id] = note),
+                                onNoteChanged: _setNote,
                                 onClear: (_cart.isNotEmpty && !_isBusy)
                                     ? _clearCart
                                     : null,
@@ -532,9 +676,10 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   }
 }
 
-class _MenuPanel extends StatelessWidget {
+class _MenuPanel extends StatefulWidget {
   const _MenuPanel({
-    required this.future,
+    required this.categories,
+    required this.error,
     required this.quantities,
     required this.onTap,
     required this.enabled,
@@ -542,7 +687,12 @@ class _MenuPanel extends StatelessWidget {
     required this.searchQuery,
   });
 
-  final Future<List<MenuItem>>? future;
+  /// Null while the initial subscription result hasn't arrived yet; kept
+  /// live-updated by `EmployeeTerminalScreen`'s `menu:listForDevice`
+  /// subscription for the whole lifetime of this screen (see
+  /// `_subscribeMenu`) — never re-fetched via a one-shot call.
+  final List<MenuCategory>? categories;
+  final String? error;
   final Map<String, int> quantities;
   final ValueChanged<MenuItem> onTap;
   final bool enabled;
@@ -550,60 +700,123 @@ class _MenuPanel extends StatelessWidget {
   final String searchQuery;
 
   @override
+  State<_MenuPanel> createState() => _MenuPanelState();
+}
+
+class _MenuPanelState extends State<_MenuPanel> {
+  // 0 = "All"; index i>0 selects categories[i-1].
+  int _selectedCategoryIndex = 0;
+
+  @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<MenuItem>>(
-      future: future,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return ErrorState(
-            message: friendlyErrorMessage(
-              snapshot.error!,
-              action: 'loading the menu',
-            ),
-            onRetry: onRetry,
-          );
-        }
-        final allItems = snapshot.data ?? const <MenuItem>[];
-        final query = searchQuery.trim().toLowerCase();
-        final items = query.isEmpty
-            ? allItems
-            : allItems
-                  .where((item) => item.name.toLowerCase().contains(query))
-                  .toList();
-        if (allItems.isEmpty) {
-          return const EmptyState(
-            icon: Icons.restaurant_menu,
-            message: 'No menu items found',
-          );
-        }
-        if (items.isEmpty) {
-          return const EmptyState(
-            icon: Icons.search_off_rounded,
-            message: 'No dishes match your search',
-          );
-        }
-        return GridView.builder(
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            mainAxisSpacing: 16,
-            crossAxisSpacing: 16,
-            childAspectRatio: 1.1,
+    final categories = widget.categories;
+    if (categories == null) {
+      if (widget.error != null) {
+        return ErrorState(message: widget.error!, onRetry: widget.onRetry);
+      }
+      return const Center(child: CircularProgressIndicator());
+    }
+    final allItems = categories.expand((category) => category.items).toList();
+    if (allItems.isEmpty) {
+      return const EmptyState(
+        icon: Icons.restaurant_menu,
+        message: 'No menu items found',
+      );
+    }
+
+    final query = widget.searchQuery.trim().toLowerCase();
+    var items = query.isEmpty
+        ? allItems
+        : allItems
+              .where((item) => item.name.toLowerCase().contains(query))
+              .toList();
+    // Category filter only applies when not searching, matching how search already
+    // overrides category context in the reference design.
+    if (query.isEmpty &&
+        _selectedCategoryIndex > 0 &&
+        _selectedCategoryIndex - 1 < categories.length) {
+      final selectedCategory = categories[_selectedCategoryIndex - 1];
+      items = items
+          .where((item) => item.categoryId == selectedCategory.id)
+          .toList();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // A connection error while data is already loaded shows as a banner, not a
+        // full-screen replacement - staff can keep working off the last-known menu.
+        if (widget.error != null)
+          _MenuErrorBanner(message: widget.error!, onRetry: widget.onRetry),
+        CategoryTabBar(
+          categories: ['All', ...categories.map((category) => category.name)],
+          selectedIndex: _selectedCategoryIndex,
+          onSelected: (index) => setState(() => _selectedCategoryIndex = index),
+        ),
+        const SizedBox(height: 20),
+        Expanded(
+          child: items.isEmpty
+              ? const EmptyState(
+                  icon: Icons.search_off_rounded,
+                  message: 'No dishes match your search',
+                )
+              : GridView.builder(
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    mainAxisSpacing: 16,
+                    crossAxisSpacing: 16,
+                    childAspectRatio: 1.1,
+                  ),
+                  itemCount: items.length,
+                  itemBuilder: (context, index) {
+                    final item = items[index];
+                    return DishTile(
+                      item: item,
+                      quantityInCart: widget.quantities[item.id] ?? 0,
+                      enabled: widget.enabled && item.isInStock,
+                      onTap: () => widget.onTap(item),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MenuErrorBanner extends StatelessWidget {
+  const _MenuErrorBanner({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
+        color: scheme.errorContainer,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              Icon(Icons.cloud_off, size: 18, color: scheme.onErrorContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onErrorContainer,
+                  ),
+                ),
+              ),
+              TextButton(onPressed: onRetry, child: const Text('Retry')),
+            ],
           ),
-          itemCount: items.length,
-          itemBuilder: (context, index) {
-            final item = items[index];
-            return DishTile(
-              item: item,
-              quantityInCart: quantities[item.id] ?? 0,
-              enabled: enabled && item.available,
-              onTap: () => onTap(item),
-            );
-          },
-        );
-      },
+        ),
+      ),
     );
   }
 }
@@ -611,10 +824,11 @@ class _MenuPanel extends StatelessWidget {
 class _OrderPanel extends StatelessWidget {
   const _OrderPanel({
     required this.cart,
-    required this.notes,
-    required this.total,
+    required this.totalCents,
     required this.currency,
     required this.isBusy,
+    required this.orderType,
+    required this.onOrderTypeChanged,
     required this.paymentStage,
     required this.paymentDetail,
     required this.amountLabel,
@@ -631,18 +845,19 @@ class _OrderPanel extends StatelessWidget {
   });
 
   final List<CartEntry> cart;
-  final Map<String, String> notes;
-  final double total;
+  final int totalCents;
   final String currency;
   final bool isBusy;
+  final OrderType orderType;
+  final ValueChanged<OrderType> onOrderTypeChanged;
   final PaymentPanelStage? paymentStage;
   final String? paymentDetail;
   final String amountLabel;
   final bool isPrinting;
-  final ValueChanged<MenuItem> onIncrement;
-  final ValueChanged<MenuItem> onDecrement;
-  final ValueChanged<MenuItem> onRemoveLine;
-  final void Function(MenuItem item, String note) onNoteChanged;
+  final ValueChanged<CartEntry> onIncrement;
+  final ValueChanged<CartEntry> onDecrement;
+  final ValueChanged<CartEntry> onRemoveLine;
+  final void Function(CartEntry entry, String note) onNoteChanged;
   final VoidCallback? onClear;
   final VoidCallback onCharge;
   final VoidCallback onCancelCharge;
@@ -693,7 +908,10 @@ class _OrderPanel extends StatelessWidget {
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const OrderTypePills(),
+                    OrderTypePills(
+                      selected: orderType,
+                      onChanged: isBusy ? (_) {} : onOrderTypeChanged,
+                    ),
                     const SizedBox(height: 16),
                     Expanded(
                       child: cart.isEmpty
@@ -709,13 +927,12 @@ class _OrderPanel extends StatelessWidget {
                                 final entry = cart[index];
                                 return _CartLine(
                                   entry: entry,
-                                  note: notes[entry.item.id] ?? '',
                                   isBusy: isBusy,
-                                  onIncrement: () => onIncrement(entry.item),
-                                  onDecrement: () => onDecrement(entry.item),
-                                  onRemove: () => onRemoveLine(entry.item),
+                                  onIncrement: () => onIncrement(entry),
+                                  onDecrement: () => onDecrement(entry),
+                                  onRemove: () => onRemoveLine(entry),
                                   onNoteChanged: (note) =>
-                                      onNoteChanged(entry.item, note),
+                                      onNoteChanged(entry, note),
                                 );
                               },
                             ),
@@ -743,7 +960,7 @@ class _OrderPanel extends StatelessWidget {
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         Text(
-                          '${total.toStringAsFixed(2)} $currency',
+                          '${(totalCents / 100).toStringAsFixed(2)} $currency',
                           style: Theme.of(context).textTheme.titleLarge,
                         ),
                       ],
@@ -752,9 +969,11 @@ class _OrderPanel extends StatelessWidget {
                     SizedBox(
                       height: 56,
                       child: FilledButton(
-                        onPressed: (!isBusy && total > 0) ? onCharge : null,
+                        onPressed: (!isBusy && totalCents > 0)
+                            ? onCharge
+                            : null,
                         child: Text(
-                          'Charge ${total.toStringAsFixed(2)} $currency',
+                          'Charge ${(totalCents / 100).toStringAsFixed(2)} $currency',
                         ),
                       ),
                     ),
@@ -769,7 +988,6 @@ class _OrderPanel extends StatelessWidget {
 class _CartLine extends StatelessWidget {
   const _CartLine({
     required this.entry,
-    required this.note,
     required this.isBusy,
     required this.onIncrement,
     required this.onDecrement,
@@ -778,7 +996,6 @@ class _CartLine extends StatelessWidget {
   });
 
   final CartEntry entry;
-  final String note;
   final bool isBusy;
   final VoidCallback onIncrement;
   final VoidCallback onDecrement;
@@ -808,11 +1025,28 @@ class _CartLine extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                entry.item.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleSmall,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    entry.item.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  if (entry.selectedAddons.isNotEmpty)
+                    Text(
+                      entry.selectedAddons
+                          .map((addon) => addon.name)
+                          .join(', '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
               ),
             ),
             const SizedBox(width: 8),
@@ -841,7 +1075,7 @@ class _CartLine extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             Text(
-              entry.subtotal.toStringAsFixed(2),
+              (entry.subtotalCents / 100).toStringAsFixed(2),
               style: Theme.of(context).textTheme.titleSmall,
             ),
             IconButton(
@@ -856,7 +1090,7 @@ class _CartLine extends StatelessWidget {
         TextFormField(
           enabled: !isBusy,
           onChanged: onNoteChanged,
-          initialValue: note,
+          initialValue: entry.note ?? '',
           decoration: const InputDecoration(
             hintText: 'Order Note...',
             isDense: true,

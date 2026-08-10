@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 
-import '../EmployeeTerminal/menu_models.dart';
+import '../../../Database/models/cart_entry.dart';
+import '../../../Database/models/menu_item.dart';
 import '../EmployeeTerminal/softpay_models.dart';
 
 sealed class CustomerBridgeEvent {}

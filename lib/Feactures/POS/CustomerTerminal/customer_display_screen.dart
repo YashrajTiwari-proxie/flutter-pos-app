@@ -2,11 +2,11 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:kds_pos/Widgets/payment_status_panel.dart';
+import 'package:kds_pos/Widgets/powered_by_footer.dart';
 
+import '../../../Database/models/cart_entry.dart';
 import '../EmployeeTerminal/error_state.dart';
-import '../EmployeeTerminal/menu_models.dart';
 import '../EmployeeTerminal/softpay_models.dart';
 import '../EmployeeTerminal/softpay_service.dart';
 import 'customer_display_bridge.dart';
@@ -55,7 +55,8 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
     }
   }
 
-  double get _total => _cart.fold(0, (sum, entry) => sum + entry.subtotal);
+  int get _totalCents =>
+      _cart.fold(0, (sum, entry) => sum + entry.subtotalCents);
 
   Future<void> _charge({
     required int amountMinor,
@@ -90,13 +91,22 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
         amountMinor: amountMinor,
         currency: currency,
       );
-      await _bridge.reportResult(result);
+      try {
+        await _bridge.reportResult(result);
+      } catch (e) {
+        // The charge itself already succeeded - the status stream above already set `_status`
+        // to `approved` before `charge()` even returned. A failure relaying that result back to
+        // the cashier engine (e.g. the MethodChannel call itself throwing) must not overwrite
+        // that with a "declined" state - the customer's card was charged either way, and
+        // telling them otherwise here would be actively wrong, not just unhelpful.
+        debugPrint('Failed to report charge result to cashier engine: $e');
+      }
     } on SoftPayException catch (e) {
       await _bridge.reportError(e);
     } catch (e) {
-      // Anything other than a SoftPayException (e.g. reporting the result back over the bridge
-      // failing) must still land this screen on a terminal state - otherwise it's stuck showing
-      // the in-progress animation forever, with no cashier present to dismiss it.
+      // Anything other than a SoftPayException (e.g. the charge call itself throwing something
+      // unexpected) must still land this screen on a terminal state - otherwise it's stuck
+      // showing the in-progress animation forever, with no cashier present to dismiss it.
       if (mounted) {
         setState(
           () => _status = PaymentStatusUpdate(
@@ -153,19 +163,19 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
                             ),
                             amountLabel:
                                 _chargeAmountLabel ??
-                                '${_total.toStringAsFixed(2)} $_currency',
+                                '${(_totalCents / 100).toStringAsFixed(2)} $_currency',
                             detail: _status!.detail,
                           )
                         : _OrderSummary(
                             cart: _cart,
-                            total: _total,
+                            totalCents: _totalCents,
                             currency: _currency,
                           ),
                   ),
                 ),
               ),
               const SizedBox(height: 16),
-              const _PoweredByFooter(),
+              const Center(child: PoweredByFooter()),
             ],
           ),
         ),
@@ -264,48 +274,15 @@ class _SecondaryPaymentPanel extends StatelessWidget {
   }
 }
 
-/// Small, low-emphasis brand credit at the bottom of the customer-facing screen - deliberately
-/// muted (reduced opacity, small size) so it reads as attribution rather than competing with the
-/// actual order/payment content above it.
-class _PoweredByFooter extends StatelessWidget {
-  const _PoweredByFooter();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final logoAsset = theme.brightness == Brightness.dark
-        ? 'assets/NorrSpectMarkLight.svg'
-        : 'assets/NorrSpectMarkDark.svg';
-    return Opacity(
-      opacity: 0.7,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text('Powered by', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(width: 12),
-          SvgPicture.asset(logoAsset, height: 44),
-          const SizedBox(width: 10),
-          Text(
-            'NorrSpect',
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _OrderSummary extends StatelessWidget {
   const _OrderSummary({
     required this.cart,
-    required this.total,
+    required this.totalCents,
     required this.currency,
   });
 
   final List<CartEntry> cart;
-  final double total;
+  final int totalCents;
   final String currency;
 
   @override
@@ -349,12 +326,12 @@ class _OrderSummary extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          '${entry.quantity} × ${entry.item.price.toStringAsFixed(2)}',
+                          '${entry.quantity} × ${(entry.item.priceCents / 100).toStringAsFixed(2)}',
                           style: Theme.of(context).textTheme.bodyMedium,
                         ),
                         const SizedBox(width: 16),
                         Text(
-                          entry.subtotal.toStringAsFixed(2),
+                          (entry.subtotalCents / 100).toStringAsFixed(2),
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                       ],
@@ -368,7 +345,7 @@ class _OrderSummary extends StatelessWidget {
           children: [
             Text('Total', style: Theme.of(context).textTheme.headlineSmall),
             Text(
-              '${total.toStringAsFixed(2)} $currency',
+              '${(totalCents / 100).toStringAsFixed(2)} $currency',
               style: Theme.of(context).textTheme.headlineSmall,
             ),
           ],

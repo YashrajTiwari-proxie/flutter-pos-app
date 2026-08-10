@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 
-import 'menu_models.dart';
+import '../../../Database/models/cart_entry.dart';
 
 /// Pushes cart snapshots to the customer-facing display, if one is attached (see
 /// `android/app/.../dualdisplay/DisplayBridge.kt`). Safe to call even when no customer display

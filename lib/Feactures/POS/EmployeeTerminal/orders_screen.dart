@@ -1,15 +1,16 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:convex_flutter/convex_flutter.dart';
 import 'package:flutter/material.dart';
+import 'package:kds_pos/Database/device_identity_service.dart';
+import 'package:kds_pos/Database/models/order.dart' as db;
+import 'package:kds_pos/Database/repositories/order_repository.dart';
 
 import 'error_state.dart';
-import 'order_models.dart';
-import 'order_service.dart';
 import 'printer_service.dart';
 import 'softpay_models.dart';
 import 'softpay_service.dart';
+import 'softpay_transaction_mapper.dart';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({super.key});
@@ -18,11 +19,17 @@ class OrdersScreen extends StatefulWidget {
   State<OrdersScreen> createState() => _OrdersScreenState();
 }
 
-enum _OrderFilter { all, pending, completed, failed, refunded }
+// Every restaurant on this backend is Swedish — orders carry no currency
+// field of their own (see employee_terminal_screen.dart's same constant).
+const _currency = 'SEK';
+
+enum _OrderFilter { all, pending, paid, failed, refunded }
 
 class _OrdersScreenState extends State<OrdersScreen> {
+  final _orders = OrderRepository.instance;
+
   SubscriptionHandle? _subscription;
-  List<Order>? _orders;
+  List<db.Order>? _orders_;
   String? _error;
   _OrderFilter _filter = _OrderFilter.all;
 
@@ -44,14 +51,11 @@ class _OrdersScreenState extends State<OrdersScreen> {
     _subscription = null;
 
     try {
-      _subscription = await ConvexClient.instance.subscribe(
-        name: 'orders:list',
-        args: const {},
-        onUpdate: (raw) {
+      _subscription = await _orders.subscribeToOrders(
+        onUpdate: (orders) {
           if (!mounted) return;
-          final decoded = jsonDecode(raw) as List<dynamic>;
           setState(() {
-            _orders = decoded.map((entry) => Order.fromJson(entry as Map<String, dynamic>)).toList();
+            _orders_ = orders;
             _error = null;
           });
         },
@@ -72,9 +76,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
     super.dispose();
   }
 
-  Future<void> _refund(Order order) async {
-    final amountMinor = await _promptRefundAmount(order);
-    if (amountMinor == null) return;
+  Future<void> _refund(db.Order order) async {
+    final amountCents = await _promptRefundAmount(order);
+    if (amountCents == null) return;
     if (!mounted) return;
 
     setState(() => _refunding[order.id] = null);
@@ -84,11 +88,11 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
     try {
       final transaction = await SoftPayService.instance.refund(
-        amountMinor: amountMinor,
-        currency: order.currency,
+        amountMinor: amountCents,
+        currency: _currency,
         posReferenceNumber: order.id,
       );
-      await OrderService.instance.recordRefund(orderId: order.id, amountMinor: amountMinor, transaction: transaction);
+      await _orders.recordRefund(orderId: order.id, amountMinor: amountCents, transaction: toTransactionSnapshot(transaction));
       // The live subscription above will push the updated order once Convex applies it - no
       // manual reload needed.
     } on SoftPayException catch (e) {
@@ -122,16 +126,22 @@ class _OrdersScreenState extends State<OrdersScreen> {
     }
   }
 
-  Future<void> _printReceipt(Order order) async {
+  Future<void> _printReceipt(db.Order order) async {
     setState(() => _printingOrderIds.add(order.id));
     try {
+      final charge = order.latestCharge;
       await PrinterService.instance.printReceipt(
-        items: order.items,
-        currency: order.currency,
-        totalMinor: order.totalMinor,
-        cardScheme: order.payment?.cardScheme,
-        partialPan: order.payment?.partialPan,
-        orderReference: order.id,
+        items: order.items
+            .map((item) => ReceiptLine(name: item.name, quantity: item.quantity, subtotalCents: item.subtotalCents))
+            .toList(),
+        currency: _currency,
+        totalCents: order.totalCents,
+        cardScheme: charge?.transaction?.cardScheme,
+        partialPan: charge?.transaction?.partialPan,
+        orderReference: order.displayId,
+        logoBytes: DeviceIdentityService.instance.logoBytes,
+        headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
+        footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
       );
     } on PrinterException catch (e) {
       if (mounted) {
@@ -143,8 +153,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
     }
   }
 
-  Future<int?> _promptRefundAmount(Order order) {
-    final controller = TextEditingController(text: (order.refundableMinor / 100).toStringAsFixed(2));
+  Future<int?> _promptRefundAmount(db.Order order) {
+    final controller = TextEditingController(text: (order.refundableCents / 100).toStringAsFixed(2));
     return showDialog<int>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -152,7 +162,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
         content: TextField(
           controller: controller,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(suffixText: order.currency),
+          decoration: const InputDecoration(suffixText: _currency),
           autofocus: true,
         ),
         actions: [
@@ -161,9 +171,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
             onPressed: () {
               final value = double.tryParse(controller.text.replaceAll(',', '.'));
               if (value == null || value <= 0) return;
-              final minor = (value * 100).round();
-              if (minor > order.refundableMinor) return;
-              Navigator.of(dialogContext).pop(minor);
+              final cents = (value * 100).round();
+              if (cents > order.refundableCents) return;
+              Navigator.of(dialogContext).pop(cents);
             },
             child: const Text('Refund'),
           ),
@@ -172,18 +182,18 @@ class _OrdersScreenState extends State<OrdersScreen> {
     );
   }
 
-  bool _matchesFilter(Order order) {
+  bool _matchesFilter(db.Order order) {
     switch (_filter) {
       case _OrderFilter.all:
         return true;
       case _OrderFilter.pending:
-        return order.status == OrderStatus.processing;
-      case _OrderFilter.completed:
-        return order.status == OrderStatus.paid;
+        return order.paymentStatus == 'pending';
+      case _OrderFilter.paid:
+        return order.paymentStatus == 'paid';
       case _OrderFilter.failed:
-        return order.status == OrderStatus.failed;
+        return order.paymentStatus == 'failed';
       case _OrderFilter.refunded:
-        return order.status == OrderStatus.refunded || order.status == OrderStatus.partiallyRefunded;
+        return order.paymentStatus == 'refunded' || order.paymentStatus == 'partially_refunded';
     }
   }
 
@@ -220,7 +230,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
   }
 
   Widget _buildBody(BuildContext context) {
-    final orders = _orders;
+    final orders = _orders_;
 
     if (orders == null) {
       if (_error != null) {
@@ -273,7 +283,7 @@ class _FilterRow extends StatelessWidget {
   static const _labels = {
     _OrderFilter.all: 'All',
     _OrderFilter.pending: 'Pending',
-    _OrderFilter.completed: 'Completed',
+    _OrderFilter.paid: 'Paid',
     _OrderFilter.failed: 'Failed',
     _OrderFilter.refunded: 'Refunded',
   };
@@ -284,11 +294,7 @@ class _FilterRow extends StatelessWidget {
       spacing: 8,
       children: [
         for (final filter in _OrderFilter.values)
-          ChoiceChip(
-            label: Text(_labels[filter]!),
-            selected: selected == filter,
-            onSelected: (_) => onSelected(filter),
-          ),
+          ChoiceChip(label: Text(_labels[filter]!), selected: selected == filter, onSelected: (_) => onSelected(filter)),
       ],
     );
   }
@@ -312,10 +318,7 @@ class _ReconnectBanner extends StatelessWidget {
             Icon(Icons.cloud_off, size: 18, color: scheme.onErrorContainer),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                message,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onErrorContainer),
-              ),
+              child: Text(message, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onErrorContainer)),
             ),
             TextButton(onPressed: onRetry, child: const Text('Retry')),
           ],
@@ -336,7 +339,7 @@ class _OrderCard extends StatelessWidget {
     required this.onPrint,
   });
 
-  final Order order;
+  final db.Order order;
   final bool isRefunding;
   final PaymentStatusUpdate? refundStatus;
   final bool refundEnabled;
@@ -344,7 +347,7 @@ class _OrderCard extends StatelessWidget {
   final bool isPrinting;
   final VoidCallback onPrint;
 
-  String _formatMinor(int minor, String currency) => '${(minor / 100).toStringAsFixed(2)} $currency';
+  String _formatCents(int cents) => '${(cents / 100).toStringAsFixed(2)} $_currency';
 
   static const _months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
@@ -368,35 +371,31 @@ class _OrderCard extends StatelessWidget {
   // its own background.
   Color _statusColor(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    switch (order.status) {
-      case OrderStatus.paid:
+    switch (order.paymentStatus) {
+      case 'paid':
         return scheme.primary;
-      case OrderStatus.failed:
+      case 'failed':
         return scheme.error;
-      case OrderStatus.cancelled:
-        return scheme.onSurfaceVariant;
-      case OrderStatus.refunded:
-      case OrderStatus.partiallyRefunded:
+      case 'refunded':
+      case 'partially_refunded':
         return scheme.tertiary;
-      case OrderStatus.processing:
+      default:
         return scheme.secondary;
     }
   }
 
   String _statusLabel() {
-    switch (order.status) {
-      case OrderStatus.processing:
-        return 'Pending';
-      case OrderStatus.paid:
+    switch (order.paymentStatus) {
+      case 'paid':
         return 'Paid';
-      case OrderStatus.failed:
+      case 'failed':
         return 'Failed';
-      case OrderStatus.cancelled:
-        return 'Cancelled';
-      case OrderStatus.refunded:
+      case 'refunded':
         return 'Refunded';
-      case OrderStatus.partiallyRefunded:
+      case 'partially_refunded':
         return 'Partially refunded';
+      default:
+        return 'Pending';
     }
   }
 
@@ -420,7 +419,8 @@ class _OrderCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final payment = order.payment;
+    final charge = order.latestCharge?.transaction;
+    final failure = order.latestFailure;
     final statusColor = _statusColor(context);
 
     return Card(
@@ -435,7 +435,7 @@ class _OrderCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    _formatTimestamp(order.createdAt),
+                    '${order.displayId} · ${_formatTimestamp(order.placedAt)}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                   ),
                 ),
@@ -452,30 +452,27 @@ class _OrderCard extends StatelessWidget {
                     Expanded(
                       child: Text('${item.quantity}× ${item.name}', style: Theme.of(context).textTheme.bodyMedium),
                     ),
-                    Text(_formatMinor(item.subtotalMinor, order.currency), style: Theme.of(context).textTheme.bodyMedium),
+                    Text(_formatCents(item.subtotalCents), style: Theme.of(context).textTheme.bodyMedium),
                   ],
                 ),
               ),
-            if (payment?.cardScheme != null) ...[
+            if (charge?.cardScheme != null) ...[
               const SizedBox(height: 4),
               Text(
-                [
-                  payment!.cardScheme,
-                  if (payment.partialPan != null) '•••• ${payment.partialPan}',
-                ].join(' '),
+                [charge!.cardScheme, if (charge.partialPan != null) '•••• ${charge.partialPan}'].join(' '),
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
-            if (order.failure != null) ...[
+            if (failure != null) ...[
               const SizedBox(height: 4),
               Text(
-                friendlySoftPayMessage(order.failure!.message),
+                friendlySoftPayMessage(failure.failureMessage ?? 'Payment failed'),
                 style: TextStyle(color: scheme.error, fontWeight: FontWeight.w600),
               ),
             ],
-            if (order.refund != null) ...[
+            if (order.refundedCents > 0) ...[
               const SizedBox(height: 4),
-              Text('Refunded: ${_formatMinor(order.refund!.amountMinor, order.currency)}'),
+              Text('Refunded: ${_formatCents(order.refundedCents)}'),
             ],
             const SizedBox(height: 12),
             const Divider(height: 1),
@@ -484,10 +481,7 @@ class _OrderCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text('Total', style: Theme.of(context).textTheme.titleMedium),
-                Text(
-                  _formatMinor(order.totalMinor, order.currency),
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
+                Text(_formatCents(order.totalCents), style: Theme.of(context).textTheme.titleLarge),
               ],
             ),
             if (isRefunding) ...[
@@ -499,11 +493,11 @@ class _OrderCard extends StatelessWidget {
                   Expanded(child: Text(_refundStageLabel(), style: Theme.of(context).textTheme.bodySmall)),
                 ],
               ),
-            ] else if (order.canRefund || order.payment != null) ...[
+            ] else if (order.canRefund || charge != null) ...[
               const SizedBox(height: 12),
               Row(
                 children: [
-                  if (order.payment != null)
+                  if (charge != null)
                     isPrinting
                         ? const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 12),

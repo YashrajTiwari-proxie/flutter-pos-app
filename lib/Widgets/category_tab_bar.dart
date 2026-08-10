@@ -1,22 +1,17 @@
 import 'package:flutter/material.dart';
 
-/// Decorative category tabs (Hot Dishes/Cold Dishes/...) matching the Figma reference.
-/// Menu items have no category field yet, so selecting a tab only changes which one is
-/// highlighted — it does not filter the dish grid.
-class CategoryTabBar extends StatefulWidget {
-  const CategoryTabBar({
-    super.key,
-    this.categories = const ['Hot Dishes', 'Cold Dishes', 'Soup', 'Grill', 'Appetizer', 'Dessert'],
-  });
+/// Category tabs matching the Figma reference — a controlled component
+/// (parent owns [selectedIndex]) so selecting a tab can actually filter the
+/// dish grid, now that menu items carry a real category from
+/// `menu:listForDevice`/`menu:listPublic`. Index 0 is conventionally "All"
+/// (the caller includes it in [categories] itself, since this widget has
+/// no opinion on that label).
+class CategoryTabBar extends StatelessWidget {
+  const CategoryTabBar({super.key, required this.categories, required this.selectedIndex, required this.onSelected});
 
   final List<String> categories;
-
-  @override
-  State<CategoryTabBar> createState() => _CategoryTabBarState();
-}
-
-class _CategoryTabBarState extends State<CategoryTabBar> {
-  int _selected = 0;
+  final int selectedIndex;
+  final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -25,28 +20,28 @@ class _CategoryTabBarState extends State<CategoryTabBar> {
       scrollDirection: Axis.horizontal,
       child: Row(
         children: [
-          for (var i = 0; i < widget.categories.length; i++)
+          for (var i = 0; i < categories.length; i++)
             Padding(
               padding: const EdgeInsets.only(right: 28),
               child: InkWell(
-                onTap: () => setState(() => _selected = i),
+                onTap: () => onSelected(i),
                 child: Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        widget.categories[i],
+                        categories[i],
                         style: TextStyle(
                           fontWeight: FontWeight.w600,
-                          color: i == _selected ? scheme.primary : scheme.onSurfaceVariant,
+                          color: i == selectedIndex ? scheme.primary : scheme.onSurfaceVariant,
                         ),
                       ),
                       const SizedBox(height: 6),
                       AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
                         height: 3,
-                        width: i == _selected ? 28 : 0,
+                        width: i == selectedIndex ? 28 : 0,
                         decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(2)),
                       ),
                     ],

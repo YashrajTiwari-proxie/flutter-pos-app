@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:kds_pos/Feactures/POS/EmployeeTerminal/menu_models.dart';
+import 'package:kds_pos/Database/models/menu_item.dart';
 
 /// A single dish card in the "Choose Dishes" grid, styled after the Figma reference.
-/// `MenuItem` has no photo yet, so a colored icon avatar stands in for the dish photo.
+/// Shows the item's real photo (`imageUrl`, from Convex storage) when set, falling back
+/// to a colored icon avatar otherwise.
 class DishTile extends StatelessWidget {
   const DishTile({
     super.key,
@@ -21,7 +22,8 @@ class DishTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final inCart = quantityInCart > 0;
-    final available = item.available;
+    final available = item.isInStock;
+    final imageUrl = item.imageUrl;
 
     return Card(
       shape: RoundedRectangleBorder(
@@ -39,17 +41,21 @@ class DishTile extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
+                    ClipOval(
+                      child: Container(
+                        width: 64,
+                        height: 64,
                         color: scheme.primary.withValues(alpha: available ? 0.16 : 0.06),
-                      ),
-                      child: Icon(
-                        Icons.ramen_dining_rounded,
-                        color: available ? scheme.primary : scheme.onSurfaceVariant.withValues(alpha: 0.4),
-                        size: 30,
+                        child: imageUrl != null
+                            ? Image.network(
+                                imageUrl,
+                                fit: BoxFit.cover,
+                                color: available ? null : Colors.white.withValues(alpha: 0.5),
+                                colorBlendMode: available ? null : BlendMode.saturation,
+                                errorBuilder: (context, error, stackTrace) =>
+                                    _fallbackIcon(scheme, available),
+                              )
+                            : _fallbackIcon(scheme, available),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -61,7 +67,10 @@ class DishTile extends StatelessWidget {
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
                     const SizedBox(height: 6),
-                    Text('\$ ${item.price.toStringAsFixed(2)}', style: Theme.of(context).textTheme.bodyMedium),
+                    Text(
+                      (item.priceCents / 100).toStringAsFixed(2),
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                     if (!available) ...[
                       const SizedBox(height: 4),
                       Text(
@@ -88,6 +97,16 @@ class DishTile extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  Widget _fallbackIcon(ColorScheme scheme, bool available) {
+    return Center(
+      child: Icon(
+        Icons.ramen_dining_rounded,
+        color: available ? scheme.primary : scheme.onSurfaceVariant.withValues(alpha: 0.4),
+        size: 30,
       ),
     );
   }

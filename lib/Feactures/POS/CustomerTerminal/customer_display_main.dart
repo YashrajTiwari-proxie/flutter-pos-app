@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:kds_pos/Core/theme/theme_controller.dart';
 
 import 'customer_app.dart';
 
@@ -17,7 +16,9 @@ Future<void> customerDisplayMain() async {
   // logcat` (filtered for the `flutter` tag) catches it even without looking at the panel.
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
-    debugPrint('CustomerDisplay error: ${details.exceptionAsString()}\n${details.stack}');
+    debugPrint(
+      'CustomerDisplay error: ${details.exceptionAsString()}\n${details.stack}',
+    );
   };
   ErrorWidget.builder = (details) => Container(
     color: Colors.red,
@@ -31,8 +32,9 @@ Future<void> customerDisplayMain() async {
   );
 
   // This engine has its own ThemeController instance (separate isolate from the cashier
-  // engine's), but both read/write the same SharedPreferences-backed storage - loading here
-  // picks up whatever the cashier last chose in Settings > Appearance.
-  await ThemeController.instance.load();
+  // engine's) and deliberately never talks to Convex, so it can't fetch the restaurant's
+  // web-configured appearance itself - it just uses ThemeController's defaults. Syncing it
+  // would mean relaying the appearance over the same native DisplayBridge that already
+  // relays cart data; not done here.
   runApp(const CustomerDisplayApp());
 }

@@ -1,19 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:kds_pos/Core/theme/theme_controller.dart';
-import 'package:kds_pos/Widgets/accent_swatch_picker.dart';
+
+import 'settings_lock_gate.dart';
 
 /// Matches the Figma Settings layout (left nav + right detail pane), but only "Appearance" is
 /// wired — the rest of the sections shown in the reference (Products Management, Notifications,
 /// Security, About) aren't part of this app yet, so they're shown as disabled placeholders.
-class SettingsScreen extends StatefulWidget {
+/// Locked behind [SettingsLockGate] — see that file for the two unlock paths.
+class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
+  Widget build(BuildContext context) =>
+      const SettingsLockGate(child: _SettingsScreenContent());
+}
+
+class _SettingsScreenContent extends StatefulWidget {
+  const _SettingsScreenContent();
+
+  @override
+  State<_SettingsScreenContent> createState() => _SettingsScreenState();
 }
 
 class _NavEntry {
-  const _NavEntry({required this.icon, required this.title, required this.subtitle, this.enabled = false});
+  const _NavEntry({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    this.enabled = false,
+  });
 
   final IconData icon;
   final String title;
@@ -21,7 +36,7 @@ class _NavEntry {
   final bool enabled;
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+class _SettingsScreenState extends State<_SettingsScreenContent> {
   static const _entries = [
     _NavEntry(
       icon: Icons.palette_outlined,
@@ -29,10 +44,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
       subtitle: 'Dark and Light mode, accent color',
       enabled: true,
     ),
-    _NavEntry(icon: Icons.storefront_outlined, title: 'Your Restaurant', subtitle: 'Coming soon'),
-    _NavEntry(icon: Icons.notifications_outlined, title: 'Notifications', subtitle: 'Coming soon'),
-    _NavEntry(icon: Icons.lock_outline_rounded, title: 'Security', subtitle: 'Coming soon'),
-    _NavEntry(icon: Icons.info_outline_rounded, title: 'About Us', subtitle: 'Coming soon'),
+    _NavEntry(
+      icon: Icons.storefront_outlined,
+      title: 'Your Restaurant',
+      subtitle: 'Coming soon',
+    ),
+    _NavEntry(
+      icon: Icons.notifications_outlined,
+      title: 'Notifications',
+      subtitle: 'Coming soon',
+    ),
+    _NavEntry(
+      icon: Icons.lock_outline_rounded,
+      title: 'Security',
+      subtitle: 'Coming soon',
+    ),
+    _NavEntry(
+      icon: Icons.info_outline_rounded,
+      title: 'About Us',
+      subtitle: 'Coming soon',
+    ),
   ];
 
   int _selected = 0;
@@ -46,7 +77,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SizedBox(width: 280, child: _NavList(entries: _entries, selected: _selected, onSelected: _select)),
+            SizedBox(
+              width: 280,
+              child: _NavList(
+                entries: _entries,
+                selected: _selected,
+                onSelected: _select,
+              ),
+            ),
             const SizedBox(width: 24),
             Expanded(
               child: _selected == 0
@@ -66,7 +104,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 class _NavList extends StatelessWidget {
-  const _NavList({required this.entries, required this.selected, required this.onSelected});
+  const _NavList({
+    required this.entries,
+    required this.selected,
+    required this.onSelected,
+  });
 
   final List<_NavEntry> entries;
   final int selected;
@@ -83,20 +125,27 @@ class _NavList extends StatelessWidget {
           children: [
             for (var i = 0; i < entries.length; i++)
               Material(
-                color: i == selected ? scheme.primary.withValues(alpha: 0.12) : Colors.transparent,
+                color: i == selected
+                    ? scheme.primary.withValues(alpha: 0.12)
+                    : Colors.transparent,
                 borderRadius: BorderRadius.circular(14),
                 child: InkWell(
                   borderRadius: BorderRadius.circular(14),
                   onTap: entries[i].enabled ? () => onSelected(i) : null,
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 12,
+                    ),
                     child: Row(
                       children: [
                         Icon(
                           entries[i].icon,
                           color: i == selected
                               ? scheme.primary
-                              : scheme.onSurfaceVariant.withValues(alpha: entries[i].enabled ? 1 : 0.4),
+                              : scheme.onSurfaceVariant.withValues(
+                                  alpha: entries[i].enabled ? 1 : 0.4,
+                                ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
@@ -105,19 +154,25 @@ class _NavList extends StatelessWidget {
                             children: [
                               Text(
                                 entries[i].title,
-                                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                                  color: i == selected
-                                      ? scheme.primary
-                                      : entries[i].enabled
-                                      ? null
-                                      : scheme.onSurfaceVariant.withValues(alpha: 0.5),
-                                ),
+                                style: Theme.of(context).textTheme.titleSmall
+                                    ?.copyWith(
+                                      color: i == selected
+                                          ? scheme.primary
+                                          : entries[i].enabled
+                                          ? null
+                                          : scheme.onSurfaceVariant.withValues(
+                                              alpha: 0.5,
+                                            ),
+                                    ),
                               ),
                               Text(
                                 entries[i].subtitle,
-                                style: Theme.of(
-                                  context,
-                                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant.withValues(alpha: 0.7)),
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: scheme.onSurfaceVariant.withValues(
+                                        alpha: 0.7,
+                                      ),
+                                    ),
                               ),
                             ],
                           ),
@@ -134,6 +189,10 @@ class _NavList extends StatelessWidget {
   }
 }
 
+/// Read-only now — appearance is one config per restaurant, set on the
+/// admin dashboard and applied live to every device (see
+/// `ThemeController.applyRemote`). This pane just shows the currently
+/// effective values; there's nothing to edit here anymore.
 class _AppearancePane extends StatelessWidget {
   const _AppearancePane();
 
@@ -146,6 +205,11 @@ class _AppearancePane extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Appearance', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              'Managed from the admin dashboard — applies to every device for this restaurant.',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
             const SizedBox(height: 24),
             Text('Theme', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 12),
@@ -153,20 +217,33 @@ class _AppearancePane extends StatelessWidget {
               listenable: ThemeController.instance,
               builder: (context, _) {
                 final mode = ThemeController.instance.themeMode;
-                return SegmentedButton<ThemeMode>(
-                  segments: const [
-                    ButtonSegment(value: ThemeMode.dark, label: Text('Dark'), icon: Icon(Icons.dark_mode_outlined)),
-                    ButtonSegment(value: ThemeMode.light, label: Text('Light'), icon: Icon(Icons.light_mode_outlined)),
+                return Row(
+                  children: [
+                    Icon(
+                      mode == ThemeMode.dark
+                          ? Icons.dark_mode_outlined
+                          : Icons.light_mode_outlined,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(mode == ThemeMode.dark ? 'Dark' : 'Light'),
                   ],
-                  selected: {mode},
-                  onSelectionChanged: (selection) => ThemeController.instance.setThemeMode(selection.first),
                 );
               },
             ),
             const SizedBox(height: 32),
             Text('Accent color', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 12),
-            const AccentSwatchPicker(),
+            ListenableBuilder(
+              listenable: ThemeController.instance,
+              builder: (context, _) => Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: ThemeController.instance.accent,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
           ],
         ),
       ),

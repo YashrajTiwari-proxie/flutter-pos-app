@@ -1,12 +1,20 @@
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
 import 'package:sunmi_flutter_plugin_printer/bean/printer.dart';
 import 'package:sunmi_flutter_plugin_printer/enum/align.dart';
 import 'package:sunmi_flutter_plugin_printer/enum/dividing_line.dart';
+import 'package:sunmi_flutter_plugin_printer/enum/image_algorithm.dart';
 import 'package:sunmi_flutter_plugin_printer/listener/printer_listener.dart';
 import 'package:sunmi_flutter_plugin_printer/printer_sdk.dart';
 import 'package:sunmi_flutter_plugin_printer/style/base_style.dart';
+import 'package:sunmi_flutter_plugin_printer/style/bitmap_style.dart';
 import 'package:sunmi_flutter_plugin_printer/style/text_style.dart';
 
-import 'order_models.dart';
+/// Logo print width in dots, comfortably under the ~384-dot printable width
+/// of a 58mm thermal roll (leaves margin either side) — height is derived
+/// from this to preserve the source image's aspect ratio.
+const int _kLogoPrintWidth = 300;
 
 class PrinterException implements Exception {
   const PrinterException({required this.code, this.message});
@@ -16,6 +24,20 @@ class PrinterException implements Exception {
 
   @override
   String toString() => 'PrinterException($code): $message';
+}
+
+/// One printed line item — deliberately not `CartEntry` (which needs a
+/// full `MenuItem`, unavailable when printing from an already-placed
+/// order's line items in `orders_screen.dart`) or the backend's
+/// `OrderItem` (unavailable when printing from an in-progress cart in
+/// `employee_terminal_screen.dart` before an order even exists). Both call
+/// sites map their own source list into this instead.
+class ReceiptLine {
+  const ReceiptLine({required this.name, required this.quantity, required this.subtotalCents});
+
+  final String name;
+  final int quantity;
+  final int subtotalCents;
 }
 
 class _PrinterListenerAdapter extends PrinterListener {
@@ -53,12 +75,15 @@ class PrinterService {
   }
 
   Future<void> printReceipt({
-    required List<OrderItem> items,
+    required List<ReceiptLine> items,
     required String currency,
-    required int totalMinor,
+    required int totalCents,
     String? cardScheme,
     String? partialPan,
     String? orderReference,
+    Uint8List? logoBytes,
+    String? headerText,
+    String? footerText,
   }) async {
     final printer = _printer;
     if (printer == null) {
@@ -74,7 +99,22 @@ class PrinterService {
       final line = printer.lineApi;
 
       await line.initLine(BaseStyle.getStyle().setAlign(Align.CENTER));
-      await line.printText('KDS POS', TextStyle.getStyle().enableBold(true));
+      if (logoBytes != null) {
+        final printHeight = await _scaledLogoHeight(logoBytes);
+        await line.printBitmap(
+          logoBytes,
+          BitmapStyle.getStyle()
+              .setAlign(Align.CENTER)
+              .setAlgorithm(ImageAlgorithm.DITHERING)
+              .setWidth(_kLogoPrintWidth)
+              .setHeight(printHeight),
+        );
+      } else {
+        await line.printText('KDS POS', TextStyle.getStyle().enableBold(true));
+      }
+      if (headerText != null && headerText.isNotEmpty) {
+        await line.printText(headerText, TextStyle.getStyle());
+      }
       await line.printDividingLine(DividingLine.EMPTY, 16);
       await line.printDividingLine(DividingLine.DOTTED, 2);
       await line.printDividingLine(DividingLine.EMPTY, 16);
@@ -89,9 +129,9 @@ class PrinterService {
           TextStyle.getStyle().enableBold(true).setAlign(Align.RIGHT),
         ],
       );
-      for (final item in items) {
+      for (final receiptLine in items) {
         await line.printTexts(
-          [item.name, '${item.quantity}', _formatMinor(item.subtotalMinor, currency)],
+          [receiptLine.name, '${receiptLine.quantity}', _formatCents(receiptLine.subtotalCents, currency)],
           [3, 1, 2],
           [TextStyle.getStyle(), TextStyle.getStyle(), TextStyle.getStyle().setAlign(Align.RIGHT)],
         );
@@ -102,7 +142,7 @@ class PrinterService {
       await line.printDividingLine(DividingLine.EMPTY, 8);
 
       await line.printTexts(
-        ['Total', _formatMinor(totalMinor, currency)],
+        ['Total', _formatCents(totalCents, currency)],
         [1, 1],
         [
           TextStyle.getStyle().enableBold(true).setTextSize(32),
@@ -122,6 +162,10 @@ class PrinterService {
       if (orderReference != null) {
         await line.printText(orderReference, TextStyle.getStyle().setTextSize(20));
       }
+      if (footerText != null && footerText.isNotEmpty) {
+        await line.printDividingLine(DividingLine.EMPTY, 8);
+        await line.printText(footerText, TextStyle.getStyle());
+      }
       await line.autoOut();
     } on PrinterException {
       rethrow;
@@ -130,5 +174,22 @@ class PrinterService {
     }
   }
 
-  String _formatMinor(int minor, String currency) => '${(minor / 100).toStringAsFixed(2)} $currency';
+  String _formatCents(int cents, String currency) => '${(cents / 100).toStringAsFixed(2)} $currency';
+
+  /// Decodes just enough of the logo to read its natural dimensions so the
+  /// printed bitmap keeps its aspect ratio at [_kLogoPrintWidth] instead of
+  /// being stretched/squashed to a fixed height. Falls back to a square if
+  /// decoding fails (e.g. corrupt bytes) rather than failing the print.
+  Future<int> _scaledLogoHeight(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final height = (_kLogoPrintWidth * image.height / image.width).round();
+      image.dispose();
+      return height;
+    } catch (_) {
+      return _kLogoPrintWidth;
+    }
+  }
 }
