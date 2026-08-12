@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:convex_flutter/convex_flutter.dart';
 import 'package:flutter/material.dart';
@@ -110,6 +111,9 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
     final stillThere = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
+      // Transparent - _AreYouStillThereDialog draws its own full-screen blur instead of the
+      // default solid scrim, so the menu/cart behind it is still visible but clearly unreachable.
+      barrierColor: Colors.transparent,
       builder: (context) =>
           _AreYouStillThereDialog(countdown: _idlePromptCountdown),
     );
@@ -178,21 +182,51 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
 
   Future<void> _addToCart(MenuItem item) async {
     if (_isCharging) return;
-    var selectedAddons = const <MenuItemAddon>[];
-    if (item.addons.isNotEmpty) {
-      final picked = await showAddonPickerSheet(context, item: item);
-      if (picked == null) return; // Dismissed without confirming.
-      selectedAddons = picked;
+    // If this item is already in the cart, reopen the sheet pre-filled with its current
+    // addons/quantity - so tapping the same tile again reads as "here's what you have, adjust
+    // it" rather than always starting over from a blank quantity of 1. Only the first match
+    // matters here: an item can have more than one distinct addon combo in the cart, but this is
+    // "edit the one I'm looking at", not a picker over which combo to edit.
+    CartEntry? existingEntry;
+    for (final entry in _cart.values) {
+      if (entry.item.id == item.id) {
+        existingEntry = entry;
+        break;
+      }
     }
+
+    var selectedAddons =
+        existingEntry?.selectedAddons ?? const <MenuItemAddon>[];
+    var quantity = existingEntry?.quantity ?? 1;
+    if (item.addons.isNotEmpty) {
+      final picked = await showAddonPickerSheet(
+        context,
+        item: item,
+        initiallySelected: selectedAddons,
+        initialQuantity: quantity,
+      );
+      if (picked == null) return; // Dismissed without confirming.
+      selectedAddons = picked.addons;
+      quantity = picked.quantity;
+    } else if (existingEntry == null) {
+      // No addons and nothing already in the cart - a plain tap just adds one.
+      quantity = 1;
+    } else {
+      // No addons to pick, but this exact item is already in the cart - a repeat tap on the
+      // tile just bumps the existing line by one, same as before this change.
+      quantity = existingEntry.quantity + 1;
+    }
+
     final draft = CartEntry(
       item: item,
-      quantity: 1,
+      quantity: quantity,
       selectedAddons: selectedAddons,
     );
     setState(() {
-      final existing = _cart[draft.cartKey];
+      if (existingEntry != null) _cart.remove(existingEntry.cartKey);
+      final mergeTarget = _cart[draft.cartKey];
       _cart[draft.cartKey] = draft.copyWith(
-        quantity: (existing?.quantity ?? 0) + 1,
+        quantity: (mergeTarget?.quantity ?? 0) + quantity,
       );
     });
   }
@@ -1514,9 +1548,13 @@ class _MenuErrorBanner extends StatelessWidget {
   }
 }
 
-/// Bottom cart bar matching the reference exactly: a stack of overlapping circular previews of
-/// what's in the cart on the left, a solid-accent pill with a receipt icon + running total on
-/// the right that opens the cart view.
+/// Bottom cart bar - a plain "N items" count on the left (replacing the old stack of circular
+/// item-photo previews, which took longer to parse than just reading a number) and a
+/// solid-accent pill with a receipt icon + running total on the right that opens the cart view.
+/// Sits on its own card-like background (the whole bar used to float directly on the menu
+/// screen's own background with nothing setting it apart) and is taller/more generously padded
+/// than before, to read as a substantial, clearly-tappable bottom section rather than a thin
+/// strip easy to overlook.
 class _KioskCartBar extends StatelessWidget {
   const _KioskCartBar({
     required this.cart,
@@ -1532,100 +1570,59 @@ class _KioskCartBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final preview = cart.take(3).toList();
-    return Row(
-      children: [
-        InkWell(
-          borderRadius: BorderRadius.circular(28),
-          onTap: onTap,
-          child: SizedBox(
-            height: 56,
-            width: 28.0 + preview.length * 28,
-            child: Stack(
-              children: [
-                for (var i = 0; i < preview.length; i++)
-                  Positioned(
-                    left: i * 28,
-                    child: _CartPreviewAvatar(entry: preview[i]),
-                  ),
-                if (cart.length > preview.length)
-                  Positioned(
-                    left: preview.length * 28,
-                    child: CircleAvatar(
-                      radius: 26,
-                      backgroundColor: Theme.of(
-                        context,
-                      ).colorScheme.surfaceContainerHigh,
-                      child: Text(
-                        '+${cart.length - preview.length}',
-                        style: Theme.of(context).textTheme.labelLarge,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-        const Spacer(),
-        Material(
-          color: Theme.of(context).colorScheme.primary,
-          borderRadius: BorderRadius.circular(28),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(28),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.receipt_long_rounded, color: Colors.white),
-                  const SizedBox(width: 10),
-                  Text(
-                    '${(totalCents / 100).toStringAsFixed(2)} $currency',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ],
+    final scheme = Theme.of(context).colorScheme;
+    final itemCount = cart.fold(0, (sum, entry) => sum + entry.quantity);
+    return Material(
+      color: scheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(28),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(28),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 22),
+          child: Row(
+            children: [
+              Icon(Icons.shopping_bag_outlined, color: scheme.onSurface),
+              const SizedBox(width: 12),
+              Text(
+                itemCount == 1 ? '1 item' : '$itemCount items',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
               ),
-            ),
+              const Spacer(),
+              Material(
+                color: scheme.primary,
+                borderRadius: BorderRadius.circular(24),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.receipt_long_rounded,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        '${(totalCents / 100).toStringAsFixed(2)} $currency',
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-        ),
-      ],
-    );
-  }
-}
-
-class _CartPreviewAvatar extends StatelessWidget {
-  const _CartPreviewAvatar({required this.entry});
-
-  final CartEntry entry;
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    final imageUrl = entry.item.imageUrl;
-    return Container(
-      width: 52,
-      height: 52,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Theme.of(context).colorScheme.surfaceContainerHigh,
-        border: Border.all(
-          color: Theme.of(context).colorScheme.surface,
-          width: 3,
         ),
       ),
-      clipBehavior: Clip.antiAlias,
-      child: imageUrl != null
-          ? Image.network(
-              imageUrl,
-              fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) =>
-                  Icon(Icons.ramen_dining_rounded, color: accent),
-            )
-          : Icon(Icons.ramen_dining_rounded, color: accent),
     );
   }
 }
@@ -1677,14 +1674,14 @@ class _KioskCartView extends StatelessWidget {
               : ListView.separated(
                   itemCount: cart.length,
                   separatorBuilder: (context, index) =>
-                      const Divider(height: 24),
+                      const Divider(height: 32),
                   itemBuilder: (context, index) {
                     final entry = cart[index];
                     return Row(
                       children: [
                         Container(
-                          width: 44,
-                          height: 44,
+                          width: 56,
+                          height: 56,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: scheme.primary.withValues(alpha: 0.15),
@@ -1692,10 +1689,10 @@ class _KioskCartView extends StatelessWidget {
                           child: Icon(
                             Icons.ramen_dining_rounded,
                             color: scheme.primary,
-                            size: 22,
+                            size: 28,
                           ),
                         ),
-                        const SizedBox(width: 12),
+                        const SizedBox(width: 16),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1704,7 +1701,7 @@ class _KioskCartView extends StatelessWidget {
                                 entry.item.name,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.titleMedium,
+                                style: Theme.of(context).textTheme.titleLarge,
                               ),
                               if (entry.selectedAddons.isNotEmpty)
                                 Text(
@@ -1713,14 +1710,14 @@ class _KioskCartView extends StatelessWidget {
                                       .join(', '),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context).textTheme.bodySmall
+                                  style: Theme.of(context).textTheme.bodyMedium
                                       ?.copyWith(
                                         color: scheme.onSurfaceVariant,
                                       ),
                                 ),
                               Text(
                                 '${(entry.item.priceCents / 100).toStringAsFixed(2)} $currency',
-                                style: Theme.of(context).textTheme.bodySmall,
+                                style: Theme.of(context).textTheme.bodyMedium,
                               ),
                             ],
                           ),
@@ -1729,18 +1726,24 @@ class _KioskCartView extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 4),
                           decoration: BoxDecoration(
                             color: scheme.surfaceContainerHigh,
-                            borderRadius: BorderRadius.circular(20),
+                            borderRadius: BorderRadius.circular(24),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
                                 onPressed: () => onDecrement(entry),
+                                iconSize: 28,
                                 icon: const Icon(Icons.remove_circle_outline),
                               ),
-                              Text('${entry.quantity}'),
+                              Text(
+                                '${entry.quantity}',
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.w700),
+                              ),
                               IconButton(
                                 onPressed: () => onIncrement(entry),
+                                iconSize: 28,
                                 icon: const Icon(Icons.add_circle_outline),
                               ),
                             ],
@@ -1748,15 +1751,16 @@ class _KioskCartView extends StatelessWidget {
                         ),
                         const SizedBox(width: 12),
                         SizedBox(
-                          width: 72,
+                          width: 88,
                           child: Text(
                             (entry.subtotalCents / 100).toStringAsFixed(2),
                             textAlign: TextAlign.end,
-                            style: Theme.of(context).textTheme.titleMedium,
+                            style: Theme.of(context).textTheme.titleLarge,
                           ),
                         ),
                         IconButton(
                           onPressed: () => onRemove(entry),
+                          iconSize: 26,
                           icon: Icon(Icons.delete_outline, color: scheme.error),
                         ),
                       ],
@@ -1768,10 +1772,10 @@ class _KioskCartView extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Total', style: Theme.of(context).textTheme.headlineSmall),
+            Text('Total', style: Theme.of(context).textTheme.headlineMedium),
             Text(
               '${(totalCents / 100).toStringAsFixed(2)} $currency',
-              style: Theme.of(context).textTheme.headlineSmall,
+              style: Theme.of(context).textTheme.headlineMedium,
             ),
           ],
         ),
@@ -1780,7 +1784,7 @@ class _KioskCartView extends StatelessWidget {
           children: [
             Expanded(
               child: SizedBox(
-                height: 60,
+                height: 72,
                 child: OutlinedButton(
                   onPressed: onBackToMenu,
                   child: const Text('Cancel'),
@@ -1791,7 +1795,7 @@ class _KioskCartView extends StatelessWidget {
             Expanded(
               flex: 2,
               child: SizedBox(
-                height: 60,
+                height: 72,
                 // Proactively disabled while offline (not just rejected with a snackbar at tap
                 // time, which was the only guard before) - the kiosk should read as "browse
                 // only until connectivity's back", not as a button that mysteriously does
@@ -1895,7 +1899,17 @@ class _KioskCheckoutPanel extends StatelessWidget {
         ],
         if (isConnecting) ...[
           const SizedBox(height: 32),
-          OutlinedButton(onPressed: onCancel, child: const Text('Cancel')),
+          // Same fixed height as every other primary action button on this screen (see
+          // _KioskCartView's Cancel/Confirm Payment row) - this one used to be compact/default-
+          // sized, which read as an afterthought next to the rest of the kiosk's buttons.
+          SizedBox(
+            width: double.infinity,
+            height: 72,
+            child: OutlinedButton(
+              onPressed: onCancel,
+              child: const Text('Cancel'),
+            ),
+          ),
         ],
       ],
     );
@@ -1950,7 +1964,8 @@ class _AreYouStillThereDialog extends StatefulWidget {
 }
 
 class _AreYouStillThereDialogState extends State<_AreYouStillThereDialog> {
-  late int _secondsLeft = widget.countdown.inSeconds;
+  late final int _totalSeconds = widget.countdown.inSeconds;
+  late int _secondsLeft = _totalSeconds;
   Timer? _timer;
 
   @override
@@ -1974,21 +1989,99 @@ class _AreYouStillThereDialogState extends State<_AreYouStillThereDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      icon: const Icon(Icons.timer_outlined, size: 36),
-      title: const Text('Are you still there?'),
-      content: Text(
-        'This order will reset in $_secondsLeft seconds if there\'s no response.',
-      ),
-      actions: [
-        SizedBox(
-          width: double.infinity,
-          child: FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Yes, I\'m still here'),
+    final theme = Theme.of(context);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Full-screen blur over the menu/cart behind it - reads as a clear interruption rather
+        // than a small box easy to miss out of the corner of an eye.
+        BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(color: Colors.black.withValues(alpha: 0.45)),
+        ),
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Card(
+              margin: EdgeInsets.zero,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(32, 36, 32, 28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _CountdownRing(
+                      secondsLeft: _secondsLeft,
+                      totalSeconds: _totalSeconds,
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'Are you still there?',
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'This order will reset if there\'s no response.',
+                      style: theme.textTheme.bodyMedium,
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 28),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 56,
+                      child: FilledButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        child: const Text('Yes, I\'m still here'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Shrinking ring + a big digit at its center - reads as "time running out" at a glance from a
+/// few steps away, which a sentence of body text never did.
+class _CountdownRing extends StatelessWidget {
+  const _CountdownRing({required this.secondsLeft, required this.totalSeconds});
+
+  final int secondsLeft;
+  final int totalSeconds;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      width: 120,
+      height: 120,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          SizedBox(
+            width: 120,
+            height: 120,
+            child: CircularProgressIndicator(
+              value: secondsLeft / totalSeconds,
+              strokeWidth: 8,
+              backgroundColor: scheme.surfaceContainerHighest,
+              valueColor: AlwaysStoppedAnimation(scheme.primary),
+            ),
+          ),
+          Text(
+            '$secondsLeft',
+            style: Theme.of(
+              context,
+            ).textTheme.displayMedium?.copyWith(fontWeight: FontWeight.w700),
+          ),
+        ],
+      ),
     );
   }
 }

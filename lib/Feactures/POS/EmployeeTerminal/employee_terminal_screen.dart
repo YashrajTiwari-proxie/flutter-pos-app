@@ -159,22 +159,55 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
 
   Future<void> _addToCart(MenuItem item) async {
     if (_isBusy) return;
-    var selectedAddons = const <MenuItemAddon>[];
-    if (item.addons.isNotEmpty) {
-      final picked = await showAddonPickerSheet(context, item: item);
-      if (picked == null) return; // Dismissed without confirming.
-      selectedAddons = picked;
+    // If this item is already in the cart, reopen the sheet pre-filled with its current
+    // addons/quantity - so tapping the same tile again reads as "here's what you have, adjust
+    // it" rather than always starting over from a blank quantity of 1. Only the first match
+    // matters here: an item can have more than one distinct addon combo in the cart, but this is
+    // "edit the one I'm looking at", not a picker over which combo to edit.
+    CartEntry? existingEntry;
+    for (final entry in _cart.values) {
+      if (entry.item.id == item.id) {
+        existingEntry = entry;
+        break;
+      }
     }
+
+    var selectedAddons =
+        existingEntry?.selectedAddons ?? const <MenuItemAddon>[];
+    var quantity = existingEntry?.quantity ?? 1;
+    if (item.addons.isNotEmpty) {
+      final picked = await showAddonPickerSheet(
+        context,
+        item: item,
+        initiallySelected: selectedAddons,
+        initialQuantity: quantity,
+      );
+      if (picked == null) return; // Dismissed without confirming.
+      selectedAddons = picked.addons;
+      quantity = picked.quantity;
+    } else if (existingEntry == null) {
+      // No addons and nothing already in the cart - a plain tap just adds one.
+      quantity = 1;
+    } else {
+      // No addons to pick, but this exact item is already in the cart - a repeat tap on the
+      // tile just bumps the existing line by one, same as before this change.
+      quantity = existingEntry.quantity + 1;
+    }
+
     final draft = CartEntry(
       item: item,
-      quantity: 1,
+      quantity: quantity,
       selectedAddons: selectedAddons,
     );
     setState(() {
-      final existing = _cart[draft.cartKey];
+      final keptNote = existingEntry?.cartKey == draft.cartKey
+          ? existingEntry?.note
+          : null;
+      if (existingEntry != null) _cart.remove(existingEntry.cartKey);
+      final mergeTarget = _cart[draft.cartKey];
       _cart[draft.cartKey] = draft.copyWith(
-        quantity: (existing?.quantity ?? 0) + 1,
-        note: existing?.note,
+        quantity: (mergeTarget?.quantity ?? 0) + quantity,
+        note: mergeTarget?.note ?? keptNote,
       );
     });
     _syncCart();
