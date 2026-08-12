@@ -60,15 +60,15 @@ Android `applicationIdSuffix`/app name.
 ```mermaid
 flowchart TD
     subgraph Device["This app (any flavor)"]
-        main[main.dart] --> app[app.dart]
-        app -->|not paired| pairing[PairingScreen]
-        app -->|paired, appMode switch| screen[EmployeeTerminalScreen /\nKioskScreen /\nOrderStatusDisplayScreen]
-        screen --> repos[Database/repositories/*]
+        main["main.dart"] --> app["app.dart"]
+        app -->|"not paired"| pairing["PairingScreen"]
+        app -->|"paired (appMode switch)"| screen["EmployeeTerminalScreen /<br/>KioskScreen /<br/>OrderStatusDisplayScreen"]
+        screen --> repos["Database/repositories/*"]
     end
-    repos <-->|convex_flutter| convex[(Convex backend\nadmin-panel-v2)]
-    screen -->|SoftPay charge| softpay[SoftPay AppSwitch\n(separate app, MethodChannel)]
-    screen -->|print| printer[Sunmi built-in printer]
-    screen -.->|dual-display bridge| customerDisplay[Customer-facing\nsecondary screen]
+    repos <-->|"convex_flutter"| convex[("Convex backend<br/>admin-panel-v2")]
+    screen -->|"SoftPay charge"| softpay["SoftPay AppSwitch<br/>(separate app, MethodChannel)"]
+    screen -->|"print"| printer["Sunmi built-in printer"]
+    screen -.->|"dual-display bridge"| customerDisplay["Customer-facing<br/>secondary screen"]
 ```
 
 Every screen talks to Convex through the repositories in
@@ -97,8 +97,33 @@ handshake in section 4 before it can reach its home screen at all.
 There is deliberately **no offline fallback** — a device that can't reach
 Convex sits on `PairingScreen`'s "Device offline — retrying…" state
 forever rather than pretending to be usable. See
-`../convex_main/admin-panel-v2/DEVICE_REGISTRATION_README.md` for the full
-pairing sequence diagram and the Convex side of this.
+`../convex_main/admin-panel-v2/DEVICE_REGISTRATION_README.md` for the
+Convex side of this.
+
+```mermaid
+sequenceDiagram
+    participant Device
+    participant Convex
+    participant Staff as "Staff (admin dashboard)"
+
+    Device->>Convex: "devices:startPairing(installId, deviceType, deviceInfo)"
+    alt already an active device
+        Convex-->>Device: "token"
+        Note over Device: "Silent re-pair - no UI shown"
+    else unrecognized or revoked
+        Convex-->>Device: "requestId, code, pollToken, expiresAt"
+        Note over Device: "PairingScreen shows the code + QR"
+        loop every few seconds
+            Device->>Convex: "devices:pollPairingRequest(requestId, pollToken)"
+            Convex-->>Device: "pending"
+        end
+        Staff->>Convex: "devices:claimPairingRequest(code, name)"
+        Device->>Convex: "devices:pollPairingRequest(requestId, pollToken)"
+        Convex-->>Device: "claimed, token"
+    end
+    Device->>Convex: "devices:whoAmI (live subscription)"
+    Convex-->>Device: "restaurant info, appearance, receipt config"
+```
 
 | File | Role |
 |---|---|
@@ -130,6 +155,27 @@ hash refreshed on every `whoAmI` call). See §8.
 | `cart_reconciliation.dart` | `reconcileCartWithMenu()` — drops any cart line whose item disappeared or went out of stock against a fresh live menu snapshot, called from both `EmployeeTerminalScreen` and `KioskMenuScreen`'s menu-subscription `onUpdate`. |
 | `remote_asset_cache.dart` | `RemoteAssetCache.instance` — disk cache for restaurant-configured media (logos, kiosk background video), keyed by URL (a re-upload always gets a new URL, so no manual invalidation needed). Atomic write-then-rename so a process kill mid-download can't leave a corrupt cache entry. |
 
+**`OrderEventOutbox.flush()` decision flow** — the part worth understanding
+before touching this file:
+
+```mermaid
+flowchart TD
+    A["enqueue(name, args)"] --> B["Persist to disk with a fresh idempotencyKey"]
+    B --> C["flush()"]
+    C --> D{"Device paired?"}
+    D -->|"no"| E["Stop - retried on next enqueue or connectivity restore"]
+    D -->|"yes"| F["Send mutation to Convex"]
+    F --> G{"Succeeded?"}
+    G -->|"yes"| H["Remove from queue, process next entry"]
+    G -->|"no"| I{"Online right now?"}
+    I -->|"no"| E
+    I -->|"yes"| J{"Failed 3 times while online?"}
+    J -->|"no"| K["Record the attempt, stop this pass"]
+    J -->|"yes"| L["Drop the entry as unrecoverable, continue with the next"]
+    H --> C
+    L --> C
+```
+
 `lib/Database/models/` — plain Dart classes with `fromJson`/`toJson`,
 mirroring Convex's own shapes 1:1 (see each file's doc comment for exactly
 which Convex table/query it mirrors): `menu_category.dart`,
@@ -152,6 +198,25 @@ which Convex table/query it mirrors): `menu_category.dart`,
 ## 6. POS — Employee Terminal
 
 `lib/Feactures/POS/EmployeeTerminal/` — the cashier-facing screen.
+
+**The charge flow** (identical in shape on the Kiosk side — see §9):
+
+```mermaid
+sequenceDiagram
+    participant UI as "EmployeeTerminalScreen / KioskMenuScreen"
+    participant Convex
+    participant SoftPay
+
+    UI->>UI: "ConnectivityService.checkNow()"
+    UI->>Convex: "orders:createDeviceOrder(cart)"
+    Convex-->>UI: "orderId, totalCents (server-computed)"
+    UI->>SoftPay: "charge(amountMinor: totalCents)"
+    SoftPay-->>UI: "success / failed / TRANSACTION_INCOMPLETE / cancelled"
+    UI->>UI: "OrderEventOutbox.enqueue(result)"
+    Note over UI: "Durably queued to disk before this returns"
+    UI->>Convex: "orders:recordPaymentResult(outcome)"
+    Convex-->>UI: "ok"
+```
 
 | File | Role |
 |---|---|
