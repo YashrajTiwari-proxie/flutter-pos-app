@@ -179,19 +179,32 @@ class DeviceRepository {
 
   static final DeviceRepository instance = DeviceRepository._();
 
+  // Applied to every one-shot query/mutation below (never to `subscribeToStatus`, which is
+  // long-lived by design and never expected to "complete"). Without this, a hung underlying
+  // Convex client call - not something this repo has ever independently verified can't happen -
+  // would leave `PairingScreen` frozen on "Setting up this device…" forever, with no retry loop
+  // ever getting a chance to run again. 20s is generous for a real round-trip (including a slow
+  // mobile/kiosk network) but still bounded. A `TimeoutException` here needs no special
+  // handling of its own - every caller already catches exceptions generically and retries
+  // (`PairingScreen._runPairingLoop`) or falls back (`DeviceIdentityService.verifyRecoveryCodeOffline`,
+  // which already uses this same pattern with a shorter timeout for its own reasons).
+  static const _timeout = Duration(seconds: 20);
+
   Future<PairingOutcome> startPairing({
     required String installId,
     required String deviceType,
     required DeviceInfo deviceInfo,
   }) async {
-    final raw = await ConvexClient.instance.mutation(
-      name: 'devices:startPairing',
-      args: {
-        'installId': installId,
-        'deviceType': deviceType,
-        'deviceInfo': deviceInfo.toJson(),
-      },
-    );
+    final raw = await ConvexClient.instance
+        .mutation(
+          name: 'devices:startPairing',
+          args: {
+            'installId': installId,
+            'deviceType': deviceType,
+            'deviceInfo': deviceInfo.toJson(),
+          },
+        )
+        .timeout(_timeout);
     return PairingOutcome.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
@@ -199,25 +212,26 @@ class DeviceRepository {
     required String requestId,
     required String pollToken,
   }) async {
-    final raw = await ConvexClient.instance.mutation(
-      name: 'devices:pollPairingRequest',
-      args: {'requestId': requestId, 'pollToken': pollToken},
-    );
+    final raw = await ConvexClient.instance
+        .mutation(
+          name: 'devices:pollPairingRequest',
+          args: {'requestId': requestId, 'pollToken': pollToken},
+        )
+        .timeout(_timeout);
     return PairingPollResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<DeviceWhoAmI> whoAmI(String deviceToken) async {
-    final raw = await ConvexClient.instance.query('devices:whoAmI', {
-      'deviceToken': deviceToken,
-    });
+    final raw = await ConvexClient.instance
+        .query('devices:whoAmI', {'deviceToken': deviceToken})
+        .timeout(_timeout);
     return DeviceWhoAmI.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<void> heartbeat(String deviceToken) {
-    return ConvexClient.instance.mutation(
-      name: 'devices:heartbeat',
-      args: {'deviceToken': deviceToken},
-    );
+    return ConvexClient.instance
+        .mutation(name: 'devices:heartbeat', args: {'deviceToken': deviceToken})
+        .timeout(_timeout);
   }
 
   /// Redeems a short-lived, single-use code staff generated on the admin
@@ -229,10 +243,12 @@ class DeviceRepository {
     required String deviceToken,
     required String code,
   }) {
-    return ConvexClient.instance.mutation(
-      name: 'devices:redeemSettingsUnlockCode',
-      args: {'deviceToken': deviceToken, 'code': code},
-    );
+    return ConvexClient.instance
+        .mutation(
+          name: 'devices:redeemSettingsUnlockCode',
+          args: {'deviceToken': deviceToken, 'code': code},
+        )
+        .timeout(_timeout);
   }
 
   /// Live-watches this device's own status via `devices:whoAmI` — since

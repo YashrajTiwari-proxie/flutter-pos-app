@@ -66,6 +66,16 @@ android {
             applicationIdSuffix = ".display"
             resValue("string", "app_name", "NorrOne Display")
         }
+        // Dedicated test-only flavor for TCS-D fiscalization testing (see
+        // lib/test_main.dart / lib/Feactures/POS/Settings/TcsTest) - installs side by
+        // side with the other flavors, never ships to a real restaurant. Named "tcs",
+        // not "test" - AGP reserves flavor names starting with "test" for its own
+        // test/androidTest source sets and refuses to build otherwise.
+        create("tcs") {
+            dimension = "mode"
+            applicationIdSuffix = ".tcs"
+            resValue("string", "app_name", "NorrOne Fiscal Test")
+        }
     }
 
     buildTypes {

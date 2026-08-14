@@ -109,7 +109,18 @@ class OrderEventOutbox {
         });
         if (entry == null) return;
 
-        final idempotencyKey = entry['idempotencyKey'] as String;
+        // Checked with `is! String` (never throws), not `as String` (would throw and escape
+        // this loop entirely before the try/catch below ever runs) - a single malformed entry
+        // must never be able to jam every legitimately-queued report behind it forever. Every
+        // entry is only ever constructed by `enqueue` below with a valid idempotencyKey, so this
+        // should never actually trigger - it's a backstop, not an expected path.
+        final rawIdempotencyKey = entry['idempotencyKey'];
+        if (rawIdempotencyKey is! String) {
+          await _removeFirstEntry();
+          continue;
+        }
+        final idempotencyKey = rawIdempotencyKey;
+
         try {
           await ConvexClient.instance.mutation(
             name: entry['name'] as String,
@@ -121,7 +132,8 @@ class OrderEventOutbox {
           );
         } catch (_) {
           final online = ConnectivityService.instance.isOnline.value;
-          final attempts = (entry['attempts'] as int? ?? 0) + 1;
+          final rawAttempts = entry['attempts'];
+          final attempts = (rawAttempts is int ? rawAttempts : 0) + 1;
           if (online && attempts >= _maxOnlineAttempts) {
             // A genuine application-level rejection (we reached the server and it still said
             // no) doesn't fix itself by retrying forever - drop it and keep the rest of the
@@ -152,6 +164,18 @@ class OrderEventOutbox {
       final prefs = await SharedPreferences.getInstance();
       final entries = _load(prefs);
       entries.removeWhere((e) => e['idempotencyKey'] == idempotencyKey);
+      await prefs.setString(_storageKey, jsonEncode(entries));
+    });
+  }
+
+  /// Drops whatever is currently at the head of the queue by position, not by idempotencyKey -
+  /// used only when an entry is malformed enough that we can't even trust its key to identify
+  /// it safely (see the `is! String` check above).
+  Future<void> _removeFirstEntry() {
+    return _synchronized(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final entries = _load(prefs);
+      if (entries.isNotEmpty) entries.removeAt(0);
       await prefs.setString(_storageKey, jsonEncode(entries));
     });
   }

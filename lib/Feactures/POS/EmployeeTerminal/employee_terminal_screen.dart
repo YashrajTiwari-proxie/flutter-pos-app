@@ -400,18 +400,81 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     });
 
     try {
-      final transaction = await _softPay.charge(
-        amountMinor: chargeAmountCents,
-        currency: _currency,
-      );
-      // Awaited (not fire-and-forget) so the report is durably queued to disk - see
-      // OrderEventOutbox - before this screen moves on. The charge already happened; losing
-      // this report to an app kill in the next few milliseconds would leave Convex never
-      // learning the card was charged.
-      await _orders.recordPaymentSuccess(
-        orderId: orderId,
-        transaction: toTransactionSnapshot(transaction),
-      );
+      final TransactionResult transaction;
+      try {
+        transaction = await _softPay.charge(
+          amountMinor: chargeAmountCents,
+          currency: _currency,
+        );
+      } on SoftPayException catch (e) {
+        // TRANSACTION_INCOMPLETE/CLIENT_TIMEOUT mean the SDK (or this app's own watchdog -
+        // see SoftPayService) couldn't determine whether the charge went through - recorded as
+        // its own "unconfirmed" state (never "failed", which would risk a double-charge on
+        // retry if it actually succeeded) for staff to reconcile manually.
+        final isUnconfirmed =
+            e.code == 'TRANSACTION_INCOMPLETE' || e.code == 'CLIENT_TIMEOUT';
+        await (e.code == 'CANCELLED'
+            ? _orders.recordCancellation(orderId: orderId)
+            : isUnconfirmed
+            ? _orders.recordPaymentUnconfirmed(
+                orderId: orderId,
+                code: e.code,
+                message: e.message,
+                detailedCode: e.detailedCode,
+              )
+            : _orders.recordPaymentFailure(
+                orderId: orderId,
+                code: e.code,
+                message: e.message,
+                detailedCode: e.detailedCode,
+              ));
+        if (mounted) {
+          setState(() {
+            _paymentStage = e.code == 'CANCELLED'
+                ? PaymentPanelStage.cancelled
+                : PaymentPanelStage.declined;
+            _paymentDetail = e.code == 'CANCELLED'
+                ? null
+                : friendlySoftPayMessage(e.message);
+          });
+        }
+        return;
+      } catch (e) {
+        // Anything other than a SoftPayException from the charge call itself is unexpected
+        // enough that we genuinely don't know whether money moved - treated the same as
+        // "unconfirmed", never "failed", for the same double-charge-on-retry reason as above.
+        await _orders.recordPaymentUnconfirmed(
+          orderId: orderId,
+          code: 'UNKNOWN',
+          message: e.toString(),
+        );
+        if (mounted) {
+          setState(() {
+            _paymentStage = PaymentPanelStage.declined;
+            _paymentDetail = friendlyErrorMessage(
+              e,
+              action: 'processing this payment',
+            );
+          });
+        }
+        return;
+      }
+
+      // The charge succeeded - everything below is reporting/UI bookkeeping. A failure here
+      // (e.g. a transient disk/Convex issue while queuing the report) must NEVER downgrade an
+      // already-successful charge to a declined/failed state on screen - the money moved
+      // regardless, and OrderEventOutbox durably queues + retries this report in the background
+      // either way, so losing it here is not losing it for good.
+      try {
+        await _orders.recordPaymentSuccess(
+          orderId: orderId,
+          transaction: toTransactionSnapshot(transaction),
+        );
+      } catch (e) {
+        debugPrint(
+          'Failed to record a successful charge for order $orderId: $e',
+        );
+      }
       _lastOrderItems = cartSnapshot;
       _lastTransaction = transaction;
       if (mounted) {
@@ -424,49 +487,6 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         });
       }
       _syncCart();
-    } on SoftPayException catch (e) {
-      // TRANSACTION_INCOMPLETE means the SDK itself couldn't determine whether the charge went
-      // through - recorded as its own "unconfirmed" state (never "failed", which would risk a
-      // double-charge on retry if it actually succeeded) for staff to reconcile manually.
-      final isUnconfirmed = e.code == 'TRANSACTION_INCOMPLETE';
-      await (e.code == 'CANCELLED'
-          ? _orders.recordCancellation(orderId: orderId)
-          : isUnconfirmed
-          ? _orders.recordPaymentUnconfirmed(
-              orderId: orderId,
-              code: e.code,
-              message: e.message,
-              detailedCode: e.detailedCode,
-            )
-          : _orders.recordPaymentFailure(
-              orderId: orderId,
-              code: e.code,
-              message: e.message,
-              detailedCode: e.detailedCode,
-            ));
-      if (mounted) {
-        setState(() {
-          _paymentStage = e.code == 'CANCELLED'
-              ? PaymentPanelStage.cancelled
-              : PaymentPanelStage.declined;
-          _paymentDetail = e.code == 'CANCELLED'
-              ? null
-              : friendlySoftPayMessage(e.message);
-        });
-      }
-    } catch (e) {
-      // Anything other than a SoftPayException (e.g. a Convex/network failure while recording
-      // the order) must still land the panel on a terminal state - otherwise it's stuck showing
-      // the in-progress animation forever with no way to recover.
-      if (mounted) {
-        setState(() {
-          _paymentStage = PaymentPanelStage.declined;
-          _paymentDetail = friendlyErrorMessage(
-            e,
-            action: 'processing this payment',
-          );
-        });
-      }
     } finally {
       await _statusSubscription?.cancel();
       _statusSubscription = null;

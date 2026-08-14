@@ -18,10 +18,12 @@ class AppConvexClient {
   /// code change.
   static const String deploymentUrl = String.fromEnvironment(
     'CONVEX_URL',
-    defaultValue: 'https://glad-bear-64.eu-west-1.convex.cloud',
+    defaultValue: 'https://convex-convex-482251-51-77-222-124.sslip.io',
   );
 
   static Future<void> initialize({required String clientId}) {
-    return ConvexClient.initialize(ConvexConfig(deploymentUrl: deploymentUrl, clientId: clientId));
+    return ConvexClient.initialize(
+      ConvexConfig(deploymentUrl: deploymentUrl, clientId: clientId),
+    );
   }
 }

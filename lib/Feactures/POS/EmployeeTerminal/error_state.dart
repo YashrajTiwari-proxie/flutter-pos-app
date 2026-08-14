@@ -26,6 +26,12 @@ String friendlyErrorMessage(Object error, {required String action}) {
 /// actually seen in practice - so an uncommon failure still gets a real sentence instead of
 /// falling through to the generic SCREAMING_SNAKE_CASE humanizer below.
 const _knownSoftPayMessages = {
+  // This app's own client-side watchdog (see SoftPayService), not an SDK-reported code - the
+  // native call itself never returned in time. Same ambiguity as TRANSACTION_INCOMPLETE below:
+  // the charge may have actually gone through on the terminal even though this app never heard
+  // back, so this is worded as "check", never "try again".
+  'CLIENT_TIMEOUT':
+      'Could not confirm this payment - check the terminal for a completed charge before trying again',
   'TRANSACTION_DECLINED': 'Card declined',
   'TRANSACTION_CANCELLED': 'Cancelled',
   'TRANSACTION_DUPLICATED': 'Duplicate transaction',

@@ -22,9 +22,10 @@ For the Convex backend itself, see
 11. [Shared widgets](#11-shared-widgets)
 12. [Theming](#12-theming)
 13. [SoftPay payment integration](#13-softpay-payment-integration)
-14. [Printing](#14-printing)
-15. [Debugging index — symptom → file](#15-debugging-index--symptom--file)
-16. [Build setup & known issues](#16-build-setup--known-issues)
+14. [TCS-D fiscalization test harness](#14-tcs-d-fiscalization-test-harness)
+15. [Printing](#15-printing)
+16. [Debugging index — symptom → file](#16-debugging-index--symptom--file)
+17. [Build setup & known issues](#17-build-setup--known-issues)
 
 ---
 
@@ -52,6 +53,12 @@ flutter run   --flavor display --dart-define=APP_MODE=display -t lib/main.dart
 All three share every line of Dart code — the flavor only changes which
 screen `app.dart` shows after pairing, the orientation lock, and the
 Android `applicationIdSuffix`/app name.
+
+There is also a **4th, test-only flavor, `tcs`** — a standalone,
+side-by-side-installable build for exercising TCS-D fiscalization against
+Infrasec's verify environment. It does not boot `lib/main.dart`/`app.dart`
+at all (separate entrypoint, no pairing flow). See
+[§14](#14-tcs-d-fiscalization-test-harness) for everything about it.
 
 ---
 
@@ -372,7 +379,109 @@ CDET test-card emulator or physical test cards.
 
 ---
 
-## 14. Printing
+## 14. TCS-D fiscalization test harness
+
+Sweden's `SKVFS 2020:9` requires every register to fiscalize each receipt
+through a certified tax-control unit (CCU) before/alongside printing it.
+This app talks to Infrasec's **TCS-D** API to do that. **The backend side
+of this (Convex actions, XML building, the mTLS call to Infrasec, the
+certificate) lives entirely on the `feat/fiscal` branch of
+`admin-panel-v2`, not on this app's target branch yet** — nothing here
+touches or modifies that Convex code. Everything in this section is
+**Flutter-only**: a thin service layer that calls those Convex actions by
+name (so it's ready to use the moment `feat/fiscal` is merged), plus a
+standalone dev screen for exercising it manually against a real device
+token. The certificate/passphrase never appears anywhere in this app —
+fiscalization always happens server-side; the client only ever sees the
+Convex action's already-shaped JSON result.
+
+Not yet wired into the real checkout flow (`EmployeeTerminalScreen`'s
+`_charge()`, §6) — that integration (fiscalize after a successful SoftPay
+charge, auto-refund on fiscal failure) is future work, blocked on
+`feat/fiscal` being merged. This section documents what already exists:
+the service layer and the manual test screen.
+
+### Where everything lives
+
+| File | Role |
+|---|---|
+| `lib/Services/tcs/tcs_models.dart` | `TcsVatBand` (one VAT band — `percent`/`amount`/`subtotalAmount`, all Swedish decimal-comma strings) and `TcsResult` (the normalized result of any of the 6 fiscal actions — mirrors the backend's `ShapedTcsResult` field-for-field: `success`, `httpStatus`, `requestId`, `responseCode`/`responseMessage`/`responseReason`, `skvResponseCode`/`skvResponseMessage`, `controlServerId`, `code` (the 113-char control code, printed on the receipt), `sequenceNumber`, `applicationId`, `rawBody`, `error`). |
+| `lib/Services/tcs/tcs_formatting.dart` | Pure helpers matching TCS's strict field formats: `formatSwedishAmount(cents)` (int cents → `"116,26"`, comma decimal), `nowDateTime14()` (14-digit `YYYYMMDDhhmmss`), `randomSequenceNumber()` (12-digit), `splitVat(totalCents, vatBasisPoints)` (splits a total into `{subtotalCents, vatCents}`, rounded so they always sum back to the total — matches the backend's integer-cents VAT-math invariant exactly). |
+| `lib/Services/tcs/tcs_service.dart` | `TcsService.instance` — one method per Convex action: `agentRegisterStatus` (boot heartbeat), `agentSale`, `agentRefund`, `agentCopy`, `agentExercise`, `agentProfo`. Each is a thin `ConvexClient.instance.action(name: ..., args: ...)` call (exactly like any other device-facing call in this app), decoded into a `TcsResult`. Every call requires a `deviceToken` — the actions are POS-device-gated server-side, same trust model as every other device-facing Convex call. **Never deployed against the hosted backend during development** — the shared Convex instance doesn't have this code yet, so calling this against it fails with "Could not find public function" until `feat/fiscal` is merged. |
+| `lib/Feactures/POS/Settings/TcsTest/tcs_test_screen.dart` | `TcsTestScreen` — the manual test screen (see below). |
+| `lib/test_main.dart` | Separate entrypoint for the `tcs` flavor — boots straight into `TcsTestScreen`, no pairing, portrait orientation. |
+| `android/app/build.gradle.kts` | The `tcs` product flavor block (`applicationIdSuffix = ".tcs"`, distinct app name) — installs side-by-side with `pos`/`kiosk`/`display` on the same device, named `tcs` and not `test` because AGP reserves flavor names starting with `test` for its own generated source sets. |
+
+### What `TcsTestScreen` actually does
+
+Deliberately minimal, matching what was asked for: **no pairing/device-
+registration flow, no input form** — just hardcoded constants at the top
+of the file and one button.
+
+```mermaid
+sequenceDiagram
+    participant Screen as "TcsTestScreen"
+    participant SoftPay
+    participant Convex as "Convex (agentSale)"
+
+    Screen->>SoftPay: "charge(amountMinor: _testAmountCents)"
+    SoftPay-->>Screen: "TransactionResult (approved)"
+    Screen->>Screen: "splitVat() -> 4 VAT bands (1 real + 3 zero)"
+    Screen->>Convex: "agentSale(deviceToken, saleAmount, dateTime, sequenceNumber, vats)"
+    Convex-->>Screen: "TcsResult (control code, response reason, ...)"
+    Screen->>Screen: "Render result / error"
+```
+
+- **Constants to edit** (top of `tcs_test_screen.dart`): `_testDeviceToken`
+  (a real, active POS device token — see below for how to get one),
+  `_testAmountCents`, `_testVatBasisPoints`, `_currency`.
+- Reuses `SoftPayService.instance` exactly as `EmployeeTerminalScreen`
+  does (§6/§13) — a real SoftPay Sandbox charge, no shortcuts.
+- On approval, builds a 4-band VAT array (Infrasec's ControlData shape
+  always sends 4 bands; one real band from `splitVat`, three zero bands)
+  and calls `TcsService.instance.agentSale(...)`.
+- Never creates a Convex order and never touches
+  `OrderRepository`/`OrderEventOutbox` — this is a fiscal-only test, fully
+  decoupled from the real order lifecycle.
+- Shows every field of the returned `TcsResult` (or the caught error) via
+  `_StatusPanel`/`_TcsResultView`.
+
+### Getting a real POS device token
+
+`_testDeviceToken` needs a real, active `pos`-type device token — the
+same kind any real POS register gets from the pairing flow in §4. Either:
+pair a throwaway device from the admin dashboard's Devices page and copy
+its token, or (backend-side only, not something this app does) mint one
+directly via the existing `devices:registerViaCli` internal mutation.
+
+### Running it
+
+```bash
+flutter run --flavor tcs -t lib/test_main.dart
+# or, for an installable build:
+flutter build apk --flavor tcs -t lib/test_main.dart --debug
+```
+
+`-t lib/test_main.dart` is required — omitting it builds the `tcs`
+flavor's app id but boots the real `lib/main.dart`/`app.dart` (i.e. the
+normal pairing screen), which looks like "nothing changed" but is just
+the wrong entrypoint.
+
+### Current status / what's blocking real use
+
+The service layer calls Convex actions (`agentSale:agentSale`, etc.) that
+**only exist on `origin/feat/fiscal`**, not on this app's current backend
+branch. Until that branch is merged (and the real TCS certificate/env
+vars are configured server-side), running this against the shared hosted
+backend fails with `Could not find public function for
+'agentSale:agentSale'` — expected, not a bug in this code. Once
+`feat/fiscal` is merged and deployed, this screen and service layer need
+no changes to start working — see §16's `CONVEX_URL` override if testing
+against a non-default deployment in the meantime.
+
+---
+
+## 15. Printing
 
 `lib/Feactures/POS/EmployeeTerminal/printer_service.dart` —
 `PrinterService.instance` talks to the Sunmi built-in printer via
@@ -386,7 +495,7 @@ history).
 
 ---
 
-## 15. Debugging index — symptom → file
+## 16. Debugging index — symptom → file
 
 | Symptom | Start here |
 |---|---|
@@ -403,10 +512,12 @@ history).
 | Customer-facing secondary display shows nothing | `customer_display_main.dart`'s entrypoint registration, native `DisplayBridge.kt` — remember this engine never talks to Convex directly |
 | Settings screen won't unlock | `settings_lock_gate.dart` — check which of the two unlock paths (online code vs. offline recovery hash) is being used |
 | App connects fine but `ConnectivityBanner` still shows offline | `connectivity_service.dart` — the periodic HTTP probe, not just the OS interface-change event, is what actually flips `isOnline` |
+| `tcs` flavor boots the real pairing screen instead of `TcsTestScreen` | Missing `-t lib/test_main.dart` on the run/build command — see §14 |
+| `agentSale:agentSale` / any `agentX:agentX` "Could not find public function" | Expected until `feat/fiscal` is merged into the deployed backend branch — see §14 |
 
 ---
 
-## 16. Build setup & known issues
+## 17. Build setup & known issues
 
 ### SoftPay credentials (`android/local.properties`, gitignored)
 

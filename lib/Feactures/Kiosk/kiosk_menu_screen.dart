@@ -342,72 +342,86 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
 
     TransactionResult? transaction;
     try {
-      transaction = await _softPay.charge(
-        amountMinor: chargeAmountCents,
-        currency: _currency,
-      );
-      // Awaited (not fire-and-forget) so the report is durably queued to disk - see
-      // OrderEventOutbox - before this screen moves on. No cashier is present at a kiosk to
-      // notice a lost report, which makes this even more important here than on the staff
-      // terminal.
-      await _orders.recordPaymentSuccess(
-        orderId: orderId,
-        transaction: toTransactionSnapshot(transaction),
-      );
-      if (mounted) {
-        setState(() {
-          _paymentStage = PaymentPanelStage.approved;
-          _paymentDetail = transaction!.cardScheme == null
-              ? amountLabel
-              : '${transaction.cardScheme} · $amountLabel';
-        });
+      try {
+        transaction = await _softPay.charge(
+          amountMinor: chargeAmountCents,
+          currency: _currency,
+        );
+      } on SoftPayException catch (e) {
+        // See EmployeeTerminalScreen._charge for why TRANSACTION_INCOMPLETE/CLIENT_TIMEOUT get
+        // their own "unconfirmed" state instead of being coerced into failed.
+        final isUnconfirmed =
+            e.code == 'TRANSACTION_INCOMPLETE' || e.code == 'CLIENT_TIMEOUT';
+        await (e.code == 'CANCELLED'
+            ? _orders.recordCancellation(orderId: orderId)
+            : isUnconfirmed
+            ? _orders.recordPaymentUnconfirmed(
+                orderId: orderId,
+                code: e.code,
+                message: e.message,
+                detailedCode: e.detailedCode,
+              )
+            : _orders.recordPaymentFailure(
+                orderId: orderId,
+                code: e.code,
+                message: e.message,
+                detailedCode: e.detailedCode,
+              ));
+        if (mounted) {
+          setState(() {
+            _paymentStage = e.code == 'CANCELLED'
+                ? PaymentPanelStage.cancelled
+                : PaymentPanelStage.declined;
+            _paymentDetail = e.code == 'CANCELLED'
+                ? null
+                : friendlySoftPayMessage(e.message);
+          });
+        }
+      } catch (e) {
+        // Anything other than a SoftPayException from the charge call itself is unexpected
+        // enough that we genuinely don't know whether money moved - treated the same as
+        // "unconfirmed", never "failed", for the same double-charge-on-retry reason as above.
+        await _orders.recordPaymentUnconfirmed(
+          orderId: orderId,
+          code: 'UNKNOWN',
+          message: e.toString(),
+        );
+        if (mounted) {
+          setState(() {
+            _paymentStage = PaymentPanelStage.declined;
+            _paymentDetail = friendlyErrorMessage(
+              e,
+              action: 'processing this payment',
+            );
+          });
+        }
       }
-    } on SoftPayException catch (e) {
-      // See EmployeeTerminalScreen._charge for why TRANSACTION_INCOMPLETE gets its own
-      // "unconfirmed" state instead of being coerced into failed.
-      final isUnconfirmed = e.code == 'TRANSACTION_INCOMPLETE';
-      await (e.code == 'CANCELLED'
-          ? _orders.recordCancellation(orderId: orderId)
-          : isUnconfirmed
-          ? _orders.recordPaymentUnconfirmed(
-              orderId: orderId,
-              code: e.code,
-              message: e.message,
-              detailedCode: e.detailedCode,
-            )
-          : _orders.recordPaymentFailure(
-              orderId: orderId,
-              code: e.code,
-              message: e.message,
-              detailedCode: e.detailedCode,
-            ));
-      if (mounted) {
-        setState(() {
-          _paymentStage = e.code == 'CANCELLED'
-              ? PaymentPanelStage.cancelled
-              : PaymentPanelStage.declined;
-          _paymentDetail = e.code == 'CANCELLED'
-              ? null
-              : friendlySoftPayMessage(e.message);
-        });
-      }
-    } catch (e) {
-      // Anything other than a SoftPayException (e.g. a Convex failure while recording the
-      // result) must still land on a terminal state - otherwise the kiosk is stuck showing the
-      // in-progress animation forever, with no cashier present to intervene.
-      await _orders.recordPaymentFailure(
-        orderId: orderId,
-        code: 'UNKNOWN',
-        message: e.toString(),
-      );
-      if (mounted) {
-        setState(() {
-          _paymentStage = PaymentPanelStage.declined;
-          _paymentDetail = friendlyErrorMessage(
-            e,
-            action: 'processing this payment',
+
+      if (transaction != null) {
+        // The charge succeeded - a failure reporting it (e.g. a transient disk/Convex issue
+        // while queuing the report) must NEVER downgrade an already-successful charge to a
+        // declined/failed state on screen. OrderEventOutbox durably queues + retries this
+        // report in the background either way, so losing it here isn't losing it for good -
+        // and no cashier is present at a kiosk to notice a wrongly-declined screen, which makes
+        // this even more important here than on the staff terminal.
+        try {
+          await _orders.recordPaymentSuccess(
+            orderId: orderId,
+            transaction: toTransactionSnapshot(transaction),
           );
-        });
+        } catch (e) {
+          debugPrint(
+            'Failed to record a successful charge for order $orderId: $e',
+          );
+        }
+        if (mounted) {
+          setState(() {
+            _paymentStage = PaymentPanelStage.approved;
+            _paymentDetail = transaction!.cardScheme == null
+                ? amountLabel
+                : '${transaction.cardScheme} · $amountLabel';
+          });
+        }
       }
     } finally {
       await _statusSubscription?.cancel();
