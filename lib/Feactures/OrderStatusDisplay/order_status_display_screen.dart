@@ -209,7 +209,10 @@ class _OrderTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(
-        order.displayId,
+        // The daily ticket number is what a waiting customer actually remembers from checkout
+        // (see the receipt/payment panel) - the lifetime displayId is meaningless to them. Falls
+        // back to displayId only for the unexpected case of an order with no dailyOrderNumber.
+        order.dailyOrderNumber != null ? '#${order.dailyOrderNumber}' : order.displayId,
         style: Theme.of(context).textTheme.headlineMedium?.copyWith(
           fontWeight: FontWeight.bold,
           color: color,
