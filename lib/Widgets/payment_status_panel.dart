@@ -14,6 +14,7 @@ class PaymentStatusPanel extends StatelessWidget {
     super.key,
     required this.stage,
     required this.amountLabel,
+    this.orderReference,
     this.detail,
     this.onCancel,
     this.onDismiss,
@@ -23,6 +24,11 @@ class PaymentStatusPanel extends StatelessWidget {
 
   final PaymentPanelStage stage;
   final String amountLabel;
+  /// The order's displayId (e.g. "ST-35") — shown so staff can reference the
+  /// same order later (refund lookup, receipt reprint) without having to
+  /// note it down separately. Optional since not every caller has one yet
+  /// (e.g. before the order is created).
+  final String? orderReference;
   final String? detail;
   final VoidCallback? onCancel;
   final VoidCallback? onDismiss;
@@ -50,6 +56,15 @@ class PaymentStatusPanel extends StatelessWidget {
           Text('Pay', style: Theme.of(context).textTheme.bodyMedium),
           const SizedBox(height: 6),
           Text(amountLabel, style: Theme.of(context).textTheme.headlineMedium),
+          if (orderReference != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              orderReference!,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
           const SizedBox(height: 36),
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 350),

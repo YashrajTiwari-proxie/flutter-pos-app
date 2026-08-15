@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:convex_flutter/convex_flutter.dart';
 import 'package:flutter/material.dart';
 
 /// Turns a raw exception into a short, human-readable sentence for display in the UI, and logs
@@ -9,6 +11,21 @@ String friendlyErrorMessage(Object error, {required String action}) {
 
   if (error is TimeoutException) {
     return 'This is taking longer than expected. Check your connection and try again.';
+  }
+  // A genuine application-level rejection from a Convex function (e.g. `posPaymentsInternal
+  // .recordEvent`'s `ORDER_NOT_REFUNDABLE`) — this is a real, actionable business-rule message
+  // from the backend, not a generic transport failure, so it's worth surfacing verbatim rather
+  // than falling through to the generic "something went wrong" sentence below.
+  if (error is ClientError_ConvexError) {
+    try {
+      final decoded = jsonDecode(error.data);
+      if (decoded is Map && decoded['message'] is String) {
+        return decoded['message'] as String;
+      }
+    } catch (_) {
+      // error.data wasn't JSON (a bare string ConvexError payload) — fall through and use it as-is.
+    }
+    return error.data;
   }
   final text = error.toString();
   if (text.contains('SocketException') ||

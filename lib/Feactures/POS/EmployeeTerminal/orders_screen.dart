@@ -92,9 +92,15 @@ class _OrdersScreenState extends State<OrdersScreen> {
         currency: _currency,
         posReferenceNumber: order.id,
       );
-      await _orders.recordRefund(orderId: order.id, amountMinor: amountCents, transaction: toTransactionSnapshot(transaction));
-      // The live subscription above will push the updated order once Convex applies it - no
-      // manual reload needed.
+      // Fiscalizes the refund itself (agentRefund-backed) — the SoftPay refund already moved the
+      // money regardless of what this returns, so a null/failed report here is never treated as
+      // the refund itself failing (same reasoning as EmployeeTerminalScreen's charge path). The
+      // live subscription above will push the updated order once Convex applies it either way.
+      await _orders.reportRefundAndFiscalize(
+        orderId: order.id,
+        amountCents: amountCents,
+        transaction: toTransactionSnapshot(transaction),
+      );
     } on SoftPayException catch (e) {
       if (mounted) {
         await showDialog<void>(
@@ -129,6 +135,20 @@ class _OrdersScreenState extends State<OrdersScreen> {
   Future<void> _printReceipt(db.Order order) async {
     setState(() => _printingOrderIds.add(order.id));
     try {
+      // This button always reprints an already-completed order, never the original print —
+      // SKVFS 2014:9 Ch.6 §3 requires a copy be unmistakably marked and itself fiscalized, never
+      // just a local reprint of cached data. requestReceiptCopy makes a real, new TCS-D "Kopia"
+      // call referencing the original sale's own sequence number/dateTime.
+      final fiscal = await _orders.requestReceiptCopy(orderId: order.id);
+      if (fiscal == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not fiscalize a copy — try again')),
+          );
+        }
+        return;
+      }
+
       final charge = order.latestCharge;
       await PrinterService.instance.printReceipt(
         items: order.items
@@ -142,6 +162,21 @@ class _OrdersScreenState extends State<OrdersScreen> {
         logoBytes: DeviceIdentityService.instance.logoBytes,
         headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
         footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
+        kind: ReceiptKind.copy,
+        orgNumber: fiscal.orgNr,
+        controlServerId: fiscal.controlServerId,
+        controlCode: fiscal.code,
+        sequenceNumber: fiscal.sequenceNumber,
+        vatBreakdown: fiscal.vats
+            .map(
+              (band) => ReceiptVatBand(
+                label: '${band.percent}%',
+                netCents: _parseSwedishCents(band.subtotalAmount),
+                vatCents: _parseSwedishCents(band.amount),
+              ),
+            )
+            .where((band) => band.netCents != 0 || band.vatCents != 0)
+            .toList(),
       );
     } on PrinterException catch (e) {
       if (mounted) {
@@ -151,6 +186,16 @@ class _OrdersScreenState extends State<OrdersScreen> {
     } finally {
       if (mounted) setState(() => _printingOrderIds.remove(order.id));
     }
+  }
+
+  /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
+  /// strings (TCS's own format); the printer works in integer cents.
+  int _parseSwedishCents(String value) {
+    final parts = value.split(',');
+    final whole = int.tryParse(parts[0]) ?? 0;
+    final fraction = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+    final sign = whole < 0 ? -1 : 1;
+    return whole * 100 + sign * fraction;
   }
 
   Future<int?> _promptRefundAmount(db.Order order) {
@@ -435,7 +480,9 @@ class _OrderCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    '${order.displayId} · ${_formatTimestamp(order.placedAt)}',
+                    order.dailyOrderNumber != null
+                        ? '#${order.dailyOrderNumber} · ${order.displayId} · ${_formatTimestamp(order.placedAt)}'
+                        : '${order.displayId} · ${_formatTimestamp(order.placedAt)}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                   ),
                 ),

@@ -13,6 +13,8 @@ import 'package:kds_pos/Database/models/menu_item.dart';
 import 'package:kds_pos/Database/models/menu_item_addon.dart';
 import 'package:kds_pos/Database/repositories/menu_repository.dart';
 import 'package:kds_pos/Database/repositories/order_repository.dart';
+import 'package:kds_pos/Services/tcs/pos_payments_service.dart';
+import 'package:kds_pos/Services/tcs/tcs_models.dart';
 import 'package:kds_pos/Widgets/addon_picker_sheet.dart';
 import 'package:kds_pos/Widgets/connectivity_banner.dart';
 import 'package:kds_pos/Widgets/payment_status_panel.dart';
@@ -49,6 +51,16 @@ class KioskMenuScreen extends StatefulWidget {
 class _KioskMenuScreenState extends State<KioskMenuScreen> {
   // Every restaurant on this backend is Swedish - same as the cashier screen.
   static const _currency = 'SEK';
+
+  /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
+  /// strings (TCS's own format); the printer works in integer cents.
+  int _parseSwedishCents(String value) {
+    final parts = value.split(',');
+    final whole = int.tryParse(parts[0]) ?? 0;
+    final fraction = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+    final sign = whole < 0 ? -1 : 1;
+    return whole * 100 + sign * fraction;
+  }
 
   // How long this screen (menu/cart) can sit untouched before the "are you still there?" prompt
   // shows, and how long that prompt itself waits for a response before giving up. Deliberately
@@ -397,63 +409,123 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
         }
       }
 
+      TcsResult? fiscal;
       if (transaction != null) {
-        // The charge succeeded - a failure reporting it (e.g. a transient disk/Convex issue
-        // while queuing the report) must NEVER downgrade an already-successful charge to a
-        // declined/failed state on screen. OrderEventOutbox durably queues + retries this
-        // report in the background either way, so losing it here isn't losing it for good -
-        // and no cashier is present at a kiosk to notice a wrongly-declined screen, which makes
-        // this even more important here than on the staff terminal.
+        // The charge succeeded - a failure reporting/fiscalizing it (e.g. a transient disk/Convex
+        // issue) must NEVER downgrade an already-successful charge to a declined/failed state on
+        // screen. reportChargeAndFiscalize durably queues + retries this report in the background
+        // either way (see its own doc comment), so losing the live result here isn't losing it
+        // for good - and no cashier is present at a kiosk to notice a wrongly-declined screen,
+        // which makes this even more important here than on the staff terminal.
+        PosPaymentReportResult? report;
         try {
-          await _orders.recordPaymentSuccess(
+          report = await _orders.reportChargeAndFiscalize(
             orderId: orderId,
+            amountCents: chargeAmountCents,
             transaction: toTransactionSnapshot(transaction),
           );
         } catch (e) {
           debugPrint(
-            'Failed to record a successful charge for order $orderId: $e',
+            'Failed to report/fiscalize a successful charge for order $orderId: $e',
           );
         }
-        if (mounted) {
-          setState(() {
-            _paymentStage = PaymentPanelStage.approved;
-            _paymentDetail = transaction!.cardScheme == null
-                ? amountLabel
-                : '${transaction.cardScheme} · $amountLabel';
-          });
+
+        if (report?.requiresRefund == true) {
+          // No cashier here to notice or approve this - the refund must be fully automatic, same
+          // reasoning as EmployeeTerminalScreen but even more critical with nobody watching.
+          //
+          // `moneyRefunded` becomes true only once `_softPay.refund` itself returns without
+          // throwing (the point money actually moves back). If that call throws, no money moved —
+          // showing "refunded automatically" anyway would be false, and with no cashier present
+          // to notice, that's the single most important message to get right on this screen.
+          var moneyRefunded = false;
+          try {
+            final refundTransaction = await _softPay.refund(
+              amountMinor: chargeAmountCents,
+              currency: _currency,
+            );
+            moneyRefunded = true;
+            await _orders.reportRefundAndFiscalize(
+              orderId: orderId,
+              amountCents: chargeAmountCents,
+              reason: 'Fiscalization rejected by TCS-D — refunded automatically',
+              transaction: toTransactionSnapshot(refundTransaction),
+            );
+          } catch (e) {
+            debugPrint(
+              'Auto-refund after fiscal rejection failed for order $orderId: $e',
+            );
+          }
+          if (mounted) {
+            setState(() {
+              _paymentStage = PaymentPanelStage.declined;
+              _paymentDetail = moneyRefunded
+                  ? 'Payment could not be fiscalized — refunded automatically.'
+                  : 'Payment could not be fiscalized and the automatic refund failed — please see staff.';
+            });
+          }
+        } else {
+          fiscal = report?.fiscal;
+          if (mounted) {
+            setState(() {
+              _paymentStage = PaymentPanelStage.approved;
+              _paymentDetail = fiscal?.success == true
+                  ? (transaction!.cardScheme == null
+                        ? amountLabel
+                        : '${transaction.cardScheme} · $amountLabel')
+                  : 'Payment approved — finalizing fiscal record…';
+            });
+          }
+        }
+      }
+
+      // Gated on a genuine fiscal success, same reasoning as EmployeeTerminalScreen's print
+      // gating - never print a receipt for a fiscal call that's still pending in the background,
+      // came back "unconfirmed", or was rejected (that branch already refunded above instead).
+      if (transaction != null && fiscal != null && fiscal.success) {
+        // Auto-print: there's no cashier here to tap a print button. A printer failure is logged,
+        // not surfaced - a kiosk customer can't act on it either way.
+        try {
+          await _printer.printReceipt(
+            items: cartSnapshot
+                .map(
+                  (entry) => ReceiptLine(
+                    name: entry.item.name,
+                    quantity: entry.quantity,
+                    subtotalCents: entry.subtotalCents,
+                  ),
+                )
+                .toList(),
+            currency: _currency,
+            totalCents: transaction.amountMinor,
+            cardScheme: transaction.cardScheme,
+            partialPan: transaction.partialPan,
+            orderReference: orderId,
+            logoBytes: DeviceIdentityService.instance.logoBytes,
+            headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
+            footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
+            orgNumber: fiscal.orgNr,
+            controlServerId: fiscal.controlServerId,
+            controlCode: fiscal.code,
+            sequenceNumber: fiscal.sequenceNumber,
+            vatBreakdown: fiscal.vats
+                .map(
+                  (band) => ReceiptVatBand(
+                    label: '${band.percent}%',
+                    netCents: _parseSwedishCents(band.subtotalAmount),
+                    vatCents: _parseSwedishCents(band.amount),
+                  ),
+                )
+                .where((band) => band.netCents != 0 || band.vatCents != 0)
+                .toList(),
+          );
+        } on PrinterException catch (e) {
+          debugPrint('Kiosk receipt not printed: ${e.code} ${e.message}');
         }
       }
     } finally {
       await _statusSubscription?.cancel();
       _statusSubscription = null;
-    }
-
-    if (transaction != null) {
-      // Auto-print: there's no cashier here to tap a print button. A printer failure is logged,
-      // not surfaced - a kiosk customer can't act on it either way.
-      try {
-        await _printer.printReceipt(
-          items: cartSnapshot
-              .map(
-                (entry) => ReceiptLine(
-                  name: entry.item.name,
-                  quantity: entry.quantity,
-                  subtotalCents: entry.subtotalCents,
-                ),
-              )
-              .toList(),
-          currency: _currency,
-          totalCents: transaction.amountMinor,
-          cardScheme: transaction.cardScheme,
-          partialPan: transaction.partialPan,
-          orderReference: orderId,
-          logoBytes: DeviceIdentityService.instance.logoBytes,
-          headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
-          footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
-        );
-      } on PrinterException catch (e) {
-        debugPrint('Kiosk receipt not printed: ${e.code} ${e.message}');
-      }
     }
 
     // Leave the settled animation on screen for a moment - same pattern as the customer

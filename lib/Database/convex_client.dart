@@ -18,7 +18,7 @@ class AppConvexClient {
   /// code change.
   static const String deploymentUrl = String.fromEnvironment(
     'CONVEX_URL',
-    defaultValue: 'https://convex-convex-482251-51-77-222-124.sslip.io',
+    defaultValue: 'https://api-convex.roohrestaurant.se',
   );
 
   static Future<void> initialize({required String clientId}) {

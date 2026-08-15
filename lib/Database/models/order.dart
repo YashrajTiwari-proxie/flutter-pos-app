@@ -17,6 +17,7 @@ class Order {
     this.locationId,
     required this.orderNumber,
     required this.displayId,
+    this.dailyOrderNumber,
     this.customerId,
     required this.customerName,
     this.customerEmail,
@@ -55,6 +56,7 @@ class Order {
       locationId: json['locationId'] as String?,
       orderNumber: (json['orderNumber'] as num).toInt(),
       displayId: json['displayId'] as String,
+      dailyOrderNumber: (json['dailyOrderNumber'] as num?)?.toInt(),
       customerId: json['customerId'] as String?,
       customerName: json['customerName'] as String,
       customerEmail: json['customerEmail'] as String?,
@@ -91,6 +93,7 @@ class Order {
   final String? locationId;
   final int orderNumber;
   final String displayId;
+  final int? dailyOrderNumber;
   final String? customerId;
   final String customerName;
   final String? customerEmail;

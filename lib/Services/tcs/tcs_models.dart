@@ -24,6 +24,12 @@ class TcsVatBand {
     'amount': amount,
     'subtotalAmount': subtotalAmount,
   };
+
+  factory TcsVatBand.fromJson(Map<String, dynamic> json) => TcsVatBand(
+    percent: json['percent'] as String,
+    amount: json['amount'] as String,
+    subtotalAmount: json['subtotalAmount'] as String,
+  );
 }
 
 /// Normalized result of any of the 6 fiscal actions — mirrors
@@ -44,6 +50,8 @@ class TcsResult {
     required this.applicationId,
     required this.rawBody,
     required this.error,
+    required this.vats,
+    required this.orgNr,
   });
 
   /// true only when the backend saw HTTP 200 + ResponseCode "0" +
@@ -74,6 +82,14 @@ class TcsResult {
   /// success: false and a responseCode/responseReason instead).
   final String? error;
 
+  /// The 4 VAT bands actually sent to TCS — needed to print the required
+  /// VAT-by-rate breakdown (SKVFS 2014:9 Ch.7 §1) without a second query.
+  final List<TcsVatBand> vats;
+
+  /// The restaurant's org number — needed on the receipt, same reasoning
+  /// as [vats]. Never client-supplied; resolved server-side.
+  final String orgNr;
+
   factory TcsResult.fromJson(Map<String, dynamic> json) => TcsResult(
     success: json['success'] as bool? ?? false,
     httpStatus: (json['httpStatus'] as num?)?.toInt(),
@@ -89,5 +105,9 @@ class TcsResult {
     applicationId: json['applicationId'] as String?,
     rawBody: json['rawBody'] as String? ?? '',
     error: json['error'] as String?,
+    vats: (json['vats'] as List<dynamic>? ?? [])
+        .map((band) => TcsVatBand.fromJson(band as Map<String, dynamic>))
+        .toList(),
+    orgNr: json['orgNr'] as String? ?? '',
   );
 }

@@ -3,7 +3,7 @@ import 'transaction_snapshot.dart';
 /// Mirrors the backend's `orderPaymentEvents.type` union (schema.ts) — a
 /// structured event log rather than fields on `Order` itself, since one
 /// order can be refunded more than once.
-enum OrderPaymentEventType { charge, refund, failure, cancellation }
+enum OrderPaymentEventType { charge, refund, failure, cancellation, unconfirmed }
 
 OrderPaymentEventType _typeFromJson(String value) {
   switch (value) {
@@ -15,6 +15,8 @@ OrderPaymentEventType _typeFromJson(String value) {
       return OrderPaymentEventType.failure;
     case 'cancellation':
       return OrderPaymentEventType.cancellation;
+    case 'unconfirmed':
+      return OrderPaymentEventType.unconfirmed;
     default:
       throw ArgumentError('Unknown order payment event type: $value');
   }

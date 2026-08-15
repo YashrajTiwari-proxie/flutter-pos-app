@@ -1,7 +1,10 @@
 import 'dart:convert';
 
 import 'package:convex_flutter/convex_flutter.dart';
+import 'package:uuid/uuid.dart';
 
+import '../../Services/tcs/pos_payments_service.dart';
+import '../../Services/tcs/tcs_models.dart';
 import '../device_identity_service.dart';
 import '../models/device_cart_item.dart';
 import '../models/order.dart';
@@ -17,6 +20,7 @@ class CreateOrderResult {
   const CreateOrderResult({
     required this.orderId,
     required this.displayId,
+    this.dailyOrderNumber,
     required this.alreadyExisted,
     required this.subtotalCents,
     required this.discountCents,
@@ -28,15 +32,24 @@ class CreateOrderResult {
       CreateOrderResult(
         orderId: json['orderId'] as String,
         displayId: json['displayId'] as String,
+        dailyOrderNumber: (json['dailyOrderNumber'] as num?)?.toInt(),
         alreadyExisted: json['alreadyExisted'] as bool,
-        subtotalCents: json['subtotalCents'] as int,
-        discountCents: json['discountCents'] as int,
-        shippingCents: json['shippingCents'] as int?,
-        totalCents: json['totalCents'] as int,
+        // Convex's client always serializes a whole-number float with a
+        // decimal point (e.g. "2198.0", not "2198"), which Dart's jsonDecode
+        // parses as double — a direct `as int` cast throws on every real
+        // call. Cast through `num` first, same as Order.fromJson already
+        // does — this file's own cast was the one spot that didn't.
+        subtotalCents: (json['subtotalCents'] as num).toInt(),
+        discountCents: (json['discountCents'] as num).toInt(),
+        shippingCents: (json['shippingCents'] as num?)?.toInt(),
+        totalCents: (json['totalCents'] as num).toInt(),
       );
 
   final String orderId;
   final String displayId;
+  /// Cosmetic, resets daily per restaurant — never the fiscal record. See
+  /// backend schema.ts's `orders.dailyOrderNumber` doc comment.
+  final int? dailyOrderNumber;
   final bool alreadyExisted;
   final int subtotalCents;
   final int discountCents;
@@ -122,23 +135,36 @@ class OrderRepository {
     return CreateOrderResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
-  // recordPaymentSuccess/recordPaymentFailure/recordPaymentUnconfirmed/recordRefund/
-  // recordCancellation all go through OrderEventOutbox rather than calling
-  // ConvexClient.instance.mutation directly: these report the real-world outcome of money that
-  // may have already moved, and a plain fire-and-forget call would lose that report forever if
-  // the app is killed or the network drops between the SoftPay SDK resolving and the mutation
-  // reaching Convex. The outbox persists each report to disk before attempting to send it, so a
-  // kill mid-flight just means it's retried on the next launch/connectivity restore, not lost.
+  // A successful charge needs the LIVE fiscal result (to decide whether to print a receipt or
+  // trigger an automatic refund), so it can't be pure fire-and-forget like the others below — see
+  // reportChargeAndFiscalize's own doc comment. Failure/unconfirmed/cancellation don't fiscalize
+  // (posPayments:reportEvent short-circuits for them server-side), so nothing downstream needs
+  // their result — they stay fire-and-forget through the outbox, same durability guarantee as
+  // before, just targeting the centralized action instead of the old per-outcome mutation.
 
-  Future<void> recordPaymentSuccess({
+  /// Reports a successful charge and fiscalizes it in one call. Durable (see
+  /// [OrderEventOutbox.enqueueAndTryNow]) — if this returns null, the charge is still safely
+  /// queued and will be retried automatically; the caller should show "payment approved,
+  /// finalizing…" rather than an error, and must NOT print a receipt yet (no control code to
+  /// print) or treat this as a failure (the money already moved).
+  Future<PosPaymentReportResult?> reportChargeAndFiscalize({
     required String orderId,
+    required int amountCents,
     required TransactionSnapshot transaction,
-  }) {
-    return OrderEventOutbox.instance.enqueue('orders:recordPaymentResult', {
-      'orderId': orderId,
-      'outcome': 'success',
-      'payment': transaction.toJson(),
-    });
+  }) async {
+    final raw = await OrderEventOutbox.instance.enqueueAndTryNow(
+      'posPayments:reportEvent',
+      {
+        'orderId': orderId,
+        'type': 'charge',
+        'amountCents': amountCents,
+        'transaction': transaction.toJson(),
+      },
+      callType: OutboxCallType.action,
+      idempotencyKey: const Uuid().v4(),
+    );
+    if (raw == null) return null;
+    return PosPaymentReportResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<void> recordPaymentFailure({
@@ -147,15 +173,16 @@ class OrderRepository {
     required String message,
     int? detailedCode,
   }) {
-    return OrderEventOutbox.instance.enqueue('orders:recordPaymentResult', {
-      'orderId': orderId,
-      'outcome': 'failed',
-      'failure': {
-        'code': code,
-        'message': message,
-        if (detailedCode != null) 'detailedCode': detailedCode,
+    return OrderEventOutbox.instance.enqueue(
+      'posPayments:reportEvent',
+      {
+        'orderId': orderId,
+        'type': 'failure',
+        'failureCode': code,
+        'failureMessage': message,
       },
-    });
+      callType: OutboxCallType.action,
+    );
   }
 
   /// The SDK itself could not determine whether the charge went through (e.g. Softpay's
@@ -168,35 +195,61 @@ class OrderRepository {
     String? message,
     int? detailedCode,
   }) {
-    return OrderEventOutbox.instance.enqueue('orders:recordPaymentResult', {
-      'orderId': orderId,
-      'outcome': 'unconfirmed',
-      if (code != null || message != null)
-        'failure': {
-          'code': code ?? 'UNCONFIRMED',
-          'message': message ?? 'Payment outcome could not be confirmed',
-          if (detailedCode != null) 'detailedCode': detailedCode,
-        },
-    });
+    return OrderEventOutbox.instance.enqueue(
+      'posPayments:reportEvent',
+      {
+        'orderId': orderId,
+        'type': 'unconfirmed',
+        'failureCode': code ?? 'UNCONFIRMED',
+        'failureMessage': message ?? 'Payment outcome could not be confirmed',
+      },
+      callType: OutboxCallType.action,
+    );
   }
 
-  Future<void> recordRefund({
+  /// Reports a refund and fiscalizes it in one call — same durability/live-result reasoning as
+  /// [reportChargeAndFiscalize]. `orders:recordRefund` is retired; a refund is now a first-class
+  /// `posPayments:reportEvent` outcome with its own `agentRefund`-backed fiscal row, gated by the
+  /// same paid/partially_refunded check the old mutation had (now enforced server-side in
+  /// posPaymentsInternal.ts's recordEvent).
+  Future<PosPaymentReportResult?> reportRefundAndFiscalize({
     required String orderId,
-    required int amountMinor,
+    required int amountCents,
     String? reason,
     TransactionSnapshot? transaction,
-  }) {
-    return OrderEventOutbox.instance.enqueue('orders:recordRefund', {
-      'orderId': orderId,
-      'amountMinor': amountMinor,
-      if (reason != null) 'reason': reason,
-      if (transaction != null) 'transaction': transaction.toJson(),
-    });
+  }) async {
+    final raw = await OrderEventOutbox.instance.enqueueAndTryNow(
+      'posPayments:reportEvent',
+      {
+        'orderId': orderId,
+        'type': 'refund',
+        'amountCents': amountCents,
+        if (reason != null) 'reason': reason,
+        if (transaction != null) 'transaction': transaction.toJson(),
+      },
+      callType: OutboxCallType.action,
+      idempotencyKey: const Uuid().v4(),
+    );
+    if (raw == null) return null;
+    return PosPaymentReportResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<void> recordCancellation({required String orderId}) {
-    return OrderEventOutbox.instance.enqueue('orders:recordCancellation', {
-      'orderId': orderId,
-    });
+    return OrderEventOutbox.instance.enqueue(
+      'posPayments:reportEvent',
+      {'orderId': orderId, 'type': 'cancellation'},
+      callType: OutboxCallType.action,
+    );
+  }
+
+  /// Requests a real, fiscalized "Kopia" copy of an order's original sale — see
+  /// `PosPaymentsService.requestCopy`'s own doc comment. Returns null on failure (network, no
+  /// original sale to copy, etc.); the caller must not print anything in that case.
+  Future<TcsResult?> requestReceiptCopy({required String orderId}) async {
+    try {
+      return await PosPaymentsService.instance.requestCopy(deviceToken: _deviceToken, orderId: orderId);
+    } catch (_) {
+      return null;
+    }
   }
 }

@@ -22,7 +22,7 @@ For the Convex backend itself, see
 11. [Shared widgets](#11-shared-widgets)
 12. [Theming](#12-theming)
 13. [SoftPay payment integration](#13-softpay-payment-integration)
-14. [TCS-D fiscalization test harness](#14-tcs-d-fiscalization-test-harness)
+14. [TCS-D fiscalization](#14-tcs-d-fiscalization)
 15. [Printing](#15-printing)
 16. [Debugging index — symptom → file](#16-debugging-index--symptom--file)
 17. [Build setup & known issues](#17-build-setup--known-issues)
@@ -53,12 +53,6 @@ flutter run   --flavor display --dart-define=APP_MODE=display -t lib/main.dart
 All three share every line of Dart code — the flavor only changes which
 screen `app.dart` shows after pairing, the orientation lock, and the
 Android `applicationIdSuffix`/app name.
-
-There is also a **4th, test-only flavor, `tcs`** — a standalone,
-side-by-side-installable build for exercising TCS-D fiscalization against
-Infrasec's verify environment. It does not boot `lib/main.dart`/`app.dart`
-at all (separate entrypoint, no pairing flow). See
-[§14](#14-tcs-d-fiscalization-test-harness) for everything about it.
 
 ---
 
@@ -213,28 +207,43 @@ sequenceDiagram
     participant UI as "EmployeeTerminalScreen / KioskMenuScreen"
     participant Convex
     participant SoftPay
+    participant TCS as "TCS-D (via posPayments:reportEvent)"
 
     UI->>UI: "ConnectivityService.checkNow()"
     UI->>Convex: "orders:createDeviceOrder(cart)"
     Convex-->>UI: "orderId, totalCents (server-computed)"
     UI->>SoftPay: "charge(amountMinor: totalCents)"
     SoftPay-->>UI: "success / failed / TRANSACTION_INCOMPLETE / cancelled"
-    UI->>UI: "OrderEventOutbox.enqueue(result)"
-    Note over UI: "Durably queued to disk before this returns"
-    UI->>Convex: "orders:recordPaymentResult(outcome)"
-    Convex-->>UI: "ok"
+    UI->>UI: "OrderEventOutbox durably persists the report to disk first"
+    UI->>Convex: "posPayments:reportEvent(type: 'charge', amountCents, transaction)"
+    Note over Convex,TCS: "VAT bands computed server-side; TCS-D called; both<br/>posPaymentEvents + fiscal rows written — Flutter never<br/>builds VAT bands or calls TCS directly"
+    Convex-->>UI: "{ fiscal, requiresRefund }"
+    alt requiresRefund (fiscal cleanly rejected)
+        UI->>SoftPay: "refund(amountMinor: totalCents)"
+        UI->>Convex: "posPayments:reportEvent(type: 'refund', ...)"
+        Note over UI: "Declined — customer never charged for an unregisterable sale"
+    else fiscal.success
+        Note over UI: "Approved — receipt now printable (control code available)"
+    end
 ```
+
+Every other outcome (failure/unconfirmed/cancellation) also reports through
+`posPayments:reportEvent` (via `OrderRepository`'s `recordPaymentFailure`/
+`recordPaymentUnconfirmed`/`recordCancellation`) — these never fiscalize
+(the backend short-circuits for them), so they stay fire-and-forget through
+the outbox exactly like before, just targeting the one centralized function
+instead of three separate `orders:recordX` mutations.
 
 | File | Role |
 |---|---|
-| `employee_terminal_screen.dart` | The main screen: menu grid + search + category tabs, cart panel, order-type pills, and the whole `_charge()` flow (connectivity check → `createOrder` → `SoftPayService.charge()` → record result). Has a synchronous `_isChargeInFlight` guard set *before any `await`* to close a double-tap race that could otherwise fire two real charges — see the field's own doc comment before touching the charge flow. |
+| `employee_terminal_screen.dart` | The main screen: menu grid + search + category tabs, cart panel, order-type pills, and the whole `_charge()` flow (connectivity check → `createOrder` → `SoftPayService.charge()` → `reportChargeAndFiscalize()` → auto-refund on fiscal rejection). Has a synchronous `_isChargeInFlight` guard set *before any `await`* to close a double-tap race that could otherwise fire two real charges — see the field's own doc comment before touching the charge flow. `_lastFiscal` gates the print button — a receipt can't be printed until fiscalization has actually succeeded (SKVFS requires a confirmed registration before the receipt is issued). |
 | `softpay_service.dart` | `SoftPayService.instance` — MethodChannel/EventChannel wrapper around the native SoftPay plugin. `charge`, `refund`, `cancelCharge`, `statusUpdates` stream. |
 | `softpay_models.dart` | `PaymentStage`, `PaymentStatusUpdate`, `SoftPayException`, `TransactionResult`. |
 | `softpay_transaction_mapper.dart` | `toTransactionSnapshot()` — bridges SoftPay's `TransactionResult` into the `TransactionSnapshot` shape Convex expects. |
 | `error_state.dart` | **Read this before writing any error-facing UI.** `friendlyErrorMessage()` (generic exception → sentence), `friendlySoftPayMessage()`/`friendlySoftPayProcessingUpdate()` (SoftPay's SCREAMING_SNAKE_CASE codes → human phrases, with a curated table for every known code plus a generic humanizer fallback for anything new), `friendlyPrinterIssue()` (Sunmi printer status → sentence), plus the shared `ErrorState`/`EmptyState` widgets. |
-| `printer_service.dart` | See §14. |
+| `printer_service.dart` | See §14 for the fiscal integration and §15 for printing itself. |
 | `order_display_service.dart` | Pushes cart snapshots to the customer-facing secondary display over a native MethodChannel — see §7. |
-| `orders_screen.dart` | Order history/management: live `subscribeToOrders`, filter chips (all/pending/paid/failed/refunded), refund flow (prompts an amount, charges it as its own new SoftPay transaction, then `recordRefund`), receipt reprinting. |
+| `orders_screen.dart` | Order history/management: live `subscribeToOrders`, filter chips (all/pending/paid/failed/refunded), refund flow (prompts an amount, charges it as its own new SoftPay transaction, then `recordRefund` — **still on the old `orders:recordRefund` mutation, not yet migrated to `posPayments:reportEvent`**, see §14's TODO), receipt reprinting. |
 
 ---
 
@@ -271,8 +280,13 @@ Android process.
 
 | File | Role |
 |---|---|
-| `settings_screen.dart` | Figma-matching left-nav + right-pane layout. Only "Appearance" is wired (read-only — appearance is one config per restaurant, set on the admin dashboard and applied live via `ThemeController.applyRemote`); the rest are disabled "coming soon" placeholders. |
+| `settings_screen.dart` | Figma-matching left-nav + right-pane layout. "Appearance", "Fiscal Reports", "Journal", and "About Us" are wired; "Your Restaurant"/"Notifications"/"Security" remain disabled "coming soon" placeholders. |
 | `settings_lock_gate.dart` | `SettingsLockGate` — wraps `SettingsScreen`, re-locks every time it's rebuilt (not persisted across navigations). Two unlock paths: **online** (short-lived staff-generated code, `devices:redeemSettingsUnlockCode`) or **offline recovery** (long-lived code, verified purely against a locally cached hash, zero network calls). |
+| `About/about_pane.dart` | `AboutPane` — plain-text software version + build number (via `package_info_plus`, reading whatever Flutter's build tooling derived from `pubspec.yaml`'s `version:` — never hardcoded) and manufacturer name ("NorrSpect"). Satisfies SKVFS 2014:9 Ch.4 §4's requirement that a cash-register program expose this in-app. |
+| `FiscalReports/fiscal_reports_pane.dart`, `fiscal_report_models.dart` | `FiscalReportsPane` — X-report/Z-report toggle with every field SKVFS 2014:9 Ch.7 §2-3 requires (VAT-by-rate breakdown, payment-method totals, receipt/copy/practice counts, drawer-opening count, returns, discounts, uncompleted-sale count). **Real data**, via `FiscalReportsRepository`: X-report is a live subscription to `fiscalReports:xReportForDevice` (a running total since the last Z-report, or ever, if none); Z-report shows the latest already-generated `zReports` doc and only advances via the pane's "Generate Z-report" button (`fiscalReports:generateZReportForDevice`) — a Z-report is a formal, numbered, immutable close-of-day event, never recomputed silently. |
+| `Journal/journal_pane.dart`, `journal_entry.dart` | `JournalPane` — live subscription (`JournalRepository` → `journal:journalForDevice`) showing every fiscal event (sale/copy/refund/practice/proforma) plus every sale attempt that never even reached fiscalization (SoftPay-level failure/unconfirmed/cancellation, shown as "Failed sale"), expandable per entry for sequence number, control server ID, and full control code. This is the software-side answer to the compliance requirement that the register be able to show/export its transaction log to a tax inspector on demand. |
+
+The backend aggregation (`convex/lib/fiscalReportAggregation.ts`, `convex/fiscalReports.ts`, `convex/journal.ts`) computes everything from `posPaymentEvents`/`fiscal` directly — VAT breakdown nets out refunds against sales, payment-method totals group by card scheme, and "uncompleted sales" reflects SoftPay-level failures that never reached TCS at all.
 
 ---
 
@@ -379,105 +393,82 @@ CDET test-card emulator or physical test cards.
 
 ---
 
-## 14. TCS-D fiscalization test harness
+## 14. TCS-D fiscalization
 
 Sweden's `SKVFS 2020:9` requires every register to fiscalize each receipt
 through a certified tax-control unit (CCU) before/alongside printing it.
-This app talks to Infrasec's **TCS-D** API to do that. **The backend side
-of this (Convex actions, XML building, the mTLS call to Infrasec, the
-certificate) lives entirely on the `feat/fiscal` branch of
-`admin-panel-v2`, not on this app's target branch yet** — nothing here
-touches or modifies that Convex code. Everything in this section is
-**Flutter-only**: a thin service layer that calls those Convex actions by
-name (so it's ready to use the moment `feat/fiscal` is merged), plus a
-standalone dev screen for exercising it manually against a real device
-token. The certificate/passphrase never appears anywhere in this app —
-fiscalization always happens server-side; the client only ever sees the
-Convex action's already-shaped JSON result.
+This app talks to Infrasec's **TCS-D** API to do that, via a single
+centralized backend function — Flutter never builds VAT bands, never
+calls a raw TCS action, and never writes any fiscal record itself. It
+reports one thing only: the raw outcome of a real SoftPay charge/refund.
+Everything else (VAT math, the TCS-D call, every table write) happens
+server-side in `posPayments:reportEvent` on the `feat/fiscal` branch of
+`admin-panel-v2` (not yet merged into this app's target backend branch —
+nothing here touches or modifies that Convex code directly; the backend
+work is tracked and tested separately). The certificate/passphrase never
+appears anywhere in this app.
 
-Not yet wired into the real checkout flow (`EmployeeTerminalScreen`'s
-`_charge()`, §6) — that integration (fiscalize after a successful SoftPay
-charge, auto-refund on fiscal failure) is future work, blocked on
-`feat/fiscal` being merged. This section documents what already exists:
-the service layer and the manual test screen.
+This architecture (durable payment recording *before* any fiscal call, so
+a device going offline right after a charge can never lose or duplicate a
+fiscal record) was verified end-to-end against a real local Convex
+deployment and Infrasec's real verify environment, then wired directly
+into the real checkout flow in both `EmployeeTerminalScreen` and
+`KioskMenuScreen` (§6/§9) — there is no separate fiscal test screen; the
+real charge flow *is* the test path now.
 
 ### Where everything lives
 
 | File | Role |
 |---|---|
-| `lib/Services/tcs/tcs_models.dart` | `TcsVatBand` (one VAT band — `percent`/`amount`/`subtotalAmount`, all Swedish decimal-comma strings) and `TcsResult` (the normalized result of any of the 6 fiscal actions — mirrors the backend's `ShapedTcsResult` field-for-field: `success`, `httpStatus`, `requestId`, `responseCode`/`responseMessage`/`responseReason`, `skvResponseCode`/`skvResponseMessage`, `controlServerId`, `code` (the 113-char control code, printed on the receipt), `sequenceNumber`, `applicationId`, `rawBody`, `error`). |
-| `lib/Services/tcs/tcs_formatting.dart` | Pure helpers matching TCS's strict field formats: `formatSwedishAmount(cents)` (int cents → `"116,26"`, comma decimal), `nowDateTime14()` (14-digit `YYYYMMDDhhmmss`), `randomSequenceNumber()` (12-digit), `splitVat(totalCents, vatBasisPoints)` (splits a total into `{subtotalCents, vatCents}`, rounded so they always sum back to the total — matches the backend's integer-cents VAT-math invariant exactly). |
-| `lib/Services/tcs/tcs_service.dart` | `TcsService.instance` — one method per Convex action: `agentRegisterStatus` (boot heartbeat), `agentSale`, `agentRefund`, `agentCopy`, `agentExercise`, `agentProfo`. Each is a thin `ConvexClient.instance.action(name: ..., args: ...)` call (exactly like any other device-facing call in this app), decoded into a `TcsResult`. Every call requires a `deviceToken` — the actions are POS-device-gated server-side, same trust model as every other device-facing Convex call. **Never deployed against the hosted backend during development** — the shared Convex instance doesn't have this code yet, so calling this against it fails with "Could not find public function" until `feat/fiscal` is merged. |
-| `lib/Feactures/POS/Settings/TcsTest/tcs_test_screen.dart` | `TcsTestScreen` — the manual test screen (see below). |
-| `lib/test_main.dart` | Separate entrypoint for the `tcs` flavor — boots straight into `TcsTestScreen`, no pairing, portrait orientation. |
-| `android/app/build.gradle.kts` | The `tcs` product flavor block (`applicationIdSuffix = ".tcs"`, distinct app name) — installs side-by-side with `pos`/`kiosk`/`display` on the same device, named `tcs` and not `test` because AGP reserves flavor names starting with `test` for its own generated source sets. |
+| `lib/Services/tcs/tcs_models.dart` | `TcsVatBand` and `TcsResult` (the normalized fiscal result shape — mirrors the backend's `ShapedTcsResult` plus two fields the client needs for printing that aren't in the raw TCS response: `vats` (the 4 VAT bands actually sent) and `orgNr` (resolved server-side from the device's restaurant, never client-supplied)). This is the shape of `posPayments:reportEvent`'s `fiscal` field. |
+| `lib/Services/tcs/pos_payments_service.dart` | `PosPaymentsService.instance.reportEvent(...)` — the **one call** Flutter makes for any payment/refund outcome. Thin wrapper around `ConvexClient.instance.action(name: 'posPayments:reportEvent', ...)`, decoded into `PosPaymentReportResult` (`eventId`, `fiscal: TcsResult?`, `requiresRefund: bool`). `requiresRefund` is set only on a clean fiscal rejection of a charge — never on a network/timeout "unconfirmed" outcome, which might have actually succeeded on Infrasec's side and needs manual reconciliation instead of an automatic refund. |
+| `lib/Database/repositories/order_event_outbox.dart` | `OutboxCallType` (`mutation`/`action`) lets the durable retry queue dispatch either kind of Convex call. `enqueueAndTryNow(...)` is the addition for this flow: persists to disk first (same crash-durability guarantee as plain `enqueue`), then makes an immediate awaited attempt and returns the live result — needed because a charge's caller must know the fiscal outcome *now* (to decide whether to print or auto-refund), not just fire-and-forget in the background like a failure/cancellation report. |
+| `lib/Database/repositories/order_repository.dart` | `reportChargeAndFiscalize(...)` — calls `enqueueAndTryNow` with `posPayments:reportEvent`. Returns `null` if the immediate attempt couldn't complete (still safely queued for background retry — the caller must treat this as "pending", not an error). `recordPaymentFailure`/`recordPaymentUnconfirmed`/`recordCancellation` now also target `posPayments:reportEvent` (fire-and-forget, since none of those outcomes fiscalize) instead of the old `orders:recordPaymentResult`/`recordCancellation` mutations. `recordRefund` is **not yet migrated** — see the TODO in that file; a staff-initiated refund needs its own fiscal linkage (`agentRefund` + a linked `fiscal` row), which is separate, larger work. |
 
-### What `TcsTestScreen` actually does
+### The real charge flow, end to end
 
-Deliberately minimal, matching what was asked for: **no pairing/device-
-registration flow, no input form** — just hardcoded constants at the top
-of the file and one button.
+See §6's sequence diagram for the full picture. In short: `_charge()`
+creates the order, charges via SoftPay, then calls
+`reportChargeAndFiscalize(...)`. Three outcomes:
 
-```mermaid
-sequenceDiagram
-    participant Screen as "TcsTestScreen"
-    participant SoftPay
-    participant Convex as "Convex (agentSale)"
+- **`fiscal.success == true`** — normal case. The receipt can now be
+  printed (`printReceipt(...)` is passed `orgNumber`/`controlServerId`/
+  `vatBreakdown` straight from the fiscal result — no second query needed).
+- **`requiresRefund == true`** — TCS cleanly rejected the sale. The screen
+  immediately drives a real SoftPay refund and reports it, then shows
+  "declined" — the customer is never charged for a sale that legally
+  couldn't be registered.
+- **`report == null`** (the live attempt couldn't complete, e.g. a
+  transient network blip) — the charge is still durably queued and will
+  be retried in the background; the screen shows "finalizing…" and does
+  **not** print a receipt yet (no control code to print) and does **not**
+  treat this as a failure (the money already moved). There's currently no
+  live subscription that flips the screen over once the background retry
+  completes — staff would need to check the Journal/Orders screen later.
+  Worth a follow-up if this turns out to happen often in practice.
 
-    Screen->>SoftPay: "charge(amountMinor: _testAmountCents)"
-    SoftPay-->>Screen: "TransactionResult (approved)"
-    Screen->>Screen: "splitVat() -> 4 VAT bands (1 real + 3 zero)"
-    Screen->>Convex: "agentSale(deviceToken, saleAmount, dateTime, sequenceNumber, vats)"
-    Convex-->>Screen: "TcsResult (control code, response reason, ...)"
-    Screen->>Screen: "Render result / error"
-```
+### Getting a real POS device token and setting up a menu item for testing
 
-- **Constants to edit** (top of `tcs_test_screen.dart`): `_testDeviceToken`
-  (a real, active POS device token — see below for how to get one),
-  `_testAmountCents`, `_testVatBasisPoints`, `_currency`.
-- Reuses `SoftPayService.instance` exactly as `EmployeeTerminalScreen`
-  does (§6/§13) — a real SoftPay Sandbox charge, no shortcuts.
-- On approval, builds a 4-band VAT array (Infrasec's ControlData shape
-  always sends 4 bands; one real band from `splitVat`, three zero bands)
-  and calls `TcsService.instance.agentSale(...)`.
-- Never creates a Convex order and never touches
-  `OrderRepository`/`OrderEventOutbox` — this is a fiscal-only test, fully
-  decoupled from the real order lifecycle.
-- Shows every field of the returned `TcsResult` (or the caught error) via
-  `_StatusPanel`/`_TcsResultView`.
-
-### Getting a real POS device token
-
-`_testDeviceToken` needs a real, active `pos`-type device token — the
-same kind any real POS register gets from the pairing flow in §4. Either:
-pair a throwaway device from the admin dashboard's Devices page and copy
-its token, or (backend-side only, not something this app does) mint one
-directly via the existing `devices:registerViaCli` internal mutation.
-
-### Running it
-
-```bash
-flutter run --flavor tcs -t lib/test_main.dart
-# or, for an installable build:
-flutter build apk --flavor tcs -t lib/test_main.dart --debug
-```
-
-`-t lib/test_main.dart` is required — omitting it builds the `tcs`
-flavor's app id but boots the real `lib/main.dart`/`app.dart` (i.e. the
-normal pairing screen), which looks like "nothing changed" but is just
-the wrong entrypoint.
+A real, active `pos`-type device token is needed either way (pairing flow,
+§4, or `devices:registerViaCli`). Every menu item needs
+`menuItems.vatRateBasisPoints` set for fiscalization to work at all — no
+staff UI for this yet, set it via `menu:setVatRateViaCli` (CLI-only,
+backend-side).
 
 ### Current status / what's blocking real use
 
-The service layer calls Convex actions (`agentSale:agentSale`, etc.) that
-**only exist on `origin/feat/fiscal`**, not on this app's current backend
-branch. Until that branch is merged (and the real TCS certificate/env
-vars are configured server-side), running this against the shared hosted
-backend fails with `Could not find public function for
-'agentSale:agentSale'` — expected, not a bug in this code. Once
-`feat/fiscal` is merged and deployed, this screen and service layer need
-no changes to start working — see §16's `CONVEX_URL` override if testing
-against a non-default deployment in the meantime.
+`posPayments:reportEvent` and the two new tables it writes
+(`posPaymentEvents`, `fiscal`) **only exist on `origin/feat/fiscal`**, not
+on this app's current backend branch. Until that branch is merged, a real
+charge on the shared hosted backend fails at the fiscalization step with
+`Could not find public function for 'posPayments:reportEvent'` — expected,
+not a bug in this code (the charge itself still succeeds; only the report/
+fiscalize step fails, and it's durably queued for retry rather than lost).
+The whole flow has already been verified working against a local Convex
+deployment and Infrasec's real verify server; once `feat/fiscal` is merged
+and deployed, this code needs no changes to start working for real — see
+§17's `CONVEX_URL` override if testing against a non-default deployment in
+the meantime.
 
 ---
 
@@ -488,10 +479,23 @@ against a non-default deployment in the meantime.
 `sunmi_flutter_plugin_printer`. `status()` returns a Sunmi `Status` name
 (`READY`, `ERR_PAPER_OUT`, etc. — humanized by `friendlyPrinterIssue()` in
 `error_state.dart`). `printReceipt(...)` prints the restaurant's logo
-(scaled to preserve aspect ratio), header text, itemized lines, total,
-card scheme + last 4 digits, and footer text — called from both
-`EmployeeTerminalScreen` (fresh charge) and `OrdersScreen` (reprint from
-history).
+(scaled to preserve aspect ratio), header text, itemized lines, total, a
+VAT-by-rate breakdown (`vatBreakdown: List<ReceiptVatBand>` — populated
+from the real fiscal result's `vats`, zero-value bands filtered out), card
+scheme + last 4 digits, the org number/control-server ID footer line
+(`orgNumber`/`controlServerId`, from the same fiscal result), and footer
+text — called from `EmployeeTerminalScreen`/`KioskMenuScreen` (fresh
+charge, gated on fiscal success — see §14) and `OrdersScreen` (reprint
+from history, not yet fiscal-gated).
+
+`kind: ReceiptKind.sale | .copy` controls whether the print is an original
+or a copy — `.copy` prints a bold "KOPIA" mark at 2× the amount text's
+size (SKVFS 2014:9 Ch.5 §5's minimum), right under the header. `OrdersScreen`'s
+reprint button already passes `kind: ReceiptKind.copy` — but note this only
+fixes the **visual** compliance gap; the reprint still doesn't call a
+backend `agentCopy`-fiscalized copy yet (see the `receipts:requestCopy`
+function sketched in the fiscal orchestration plan — not implemented,
+waiting on the backend merge).
 
 ---
 
@@ -512,8 +516,8 @@ history).
 | Customer-facing secondary display shows nothing | `customer_display_main.dart`'s entrypoint registration, native `DisplayBridge.kt` — remember this engine never talks to Convex directly |
 | Settings screen won't unlock | `settings_lock_gate.dart` — check which of the two unlock paths (online code vs. offline recovery hash) is being used |
 | App connects fine but `ConnectivityBanner` still shows offline | `connectivity_service.dart` — the periodic HTTP probe, not just the OS interface-change event, is what actually flips `isOnline` |
-| `tcs` flavor boots the real pairing screen instead of `TcsTestScreen` | Missing `-t lib/test_main.dart` on the run/build command — see §14 |
-| `agentSale:agentSale` / any `agentX:agentX` "Could not find public function" | Expected until `feat/fiscal` is merged into the deployed backend branch — see §14 |
+| Charge approved but stuck on "finalizing fiscal record…" / no receipt printable | `posPayments:reportEvent`'s live call didn't complete (queued for background retry) — check `OrderEventOutbox`, or `feat/fiscal` isn't merged/deployed yet, see §14 |
+| `posPayments:reportEvent` "Could not find public function" | Expected until `feat/fiscal` is merged into the deployed backend branch — see §14 |
 
 ---
 

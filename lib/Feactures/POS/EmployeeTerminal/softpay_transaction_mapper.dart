@@ -2,9 +2,9 @@ import '../../../Database/models/transaction_snapshot.dart';
 import 'softpay_models.dart';
 
 /// Bridges the Softpay SDK's own [TransactionResult] into the shape
-/// `orders:recordPaymentResult`/`recordRefund` expect — kept feature-local
-/// (not in `Database/models`) since it couples to a Softpay-specific type,
-/// not a Convex-mirrored one.
+/// `posPayments:reportEvent`'s `transaction` arg expects — kept
+/// feature-local (not in `Database/models`) since it couples to a
+/// Softpay-specific type, not a Convex-mirrored one.
 TransactionSnapshot toTransactionSnapshot(TransactionResult transaction) => TransactionSnapshot(
   requestId: transaction.requestId,
   state: transaction.state,

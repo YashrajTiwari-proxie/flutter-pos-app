@@ -13,6 +13,8 @@ import 'package:kds_pos/Database/models/menu_item_addon.dart';
 import 'package:kds_pos/Database/repositories/menu_repository.dart';
 import 'package:kds_pos/Database/repositories/order_repository.dart';
 import 'package:kds_pos/Feactures/POS/Settings/settings_screen.dart';
+import 'package:kds_pos/Services/tcs/pos_payments_service.dart';
+import 'package:kds_pos/Services/tcs/tcs_models.dart';
 import 'package:kds_pos/Widgets/addon_picker_sheet.dart';
 import 'package:kds_pos/Widgets/app_header_bar.dart';
 import 'package:kds_pos/Widgets/app_sidebar.dart';
@@ -69,8 +71,10 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   PaymentPanelStage? _paymentStage;
   String? _paymentDetail;
   String? _activeAmountLabel;
+  String? _activeOrderReference;
   List<CartEntry>? _lastOrderItems;
   TransactionResult? _lastTransaction;
+  TcsResult? _lastFiscal;
   bool _isPrinting = false;
 
   // _paymentStage alone isn't set until partway through `_charge()` (after the connectivity
@@ -365,6 +369,9 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       );
       orderId = result.orderId;
       chargeAmountCents = result.totalCents;
+      _activeOrderReference = result.dailyOrderNumber != null
+          ? '#${result.dailyOrderNumber} · ${result.displayId}'
+          : result.displayId;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -460,29 +467,81 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         return;
       }
 
-      // The charge succeeded - everything below is reporting/UI bookkeeping. A failure here
-      // (e.g. a transient disk/Convex issue while queuing the report) must NEVER downgrade an
-      // already-successful charge to a declined/failed state on screen - the money moved
-      // regardless, and OrderEventOutbox durably queues + retries this report in the background
-      // either way, so losing it here is not losing it for good.
+      // The charge succeeded - everything below is reporting/fiscalization/UI bookkeeping. A
+      // failure here (e.g. a transient disk/Convex issue) must NEVER downgrade an already-
+      // successful charge to a declined/failed state on screen - the money moved regardless, and
+      // reportChargeAndFiscalize durably queues + retries this report in the background either
+      // way (see its own doc comment), so losing the live result here doesn't lose the report.
+      PosPaymentReportResult? report;
       try {
-        await _orders.recordPaymentSuccess(
+        report = await _orders.reportChargeAndFiscalize(
           orderId: orderId,
+          amountCents: chargeAmountCents,
           transaction: toTransactionSnapshot(transaction),
         );
       } catch (e) {
         debugPrint(
-          'Failed to record a successful charge for order $orderId: $e',
+          'Failed to report/fiscalize a successful charge for order $orderId: $e',
         );
       }
+
+      if (report?.requiresRefund == true) {
+        // Fiscalization was cleanly rejected (never for a null/"unconfirmed" report — that might
+        // have actually succeeded on Infrasec's side, and auto-refunding it too would risk
+        // refunding a sale that's actually fine). Refund immediately so the customer is never
+        // charged for a sale that legally couldn't be registered.
+        //
+        // `moneyRefunded` is set true the instant `_softPay.refund` itself returns without
+        // throwing — that's the moment the money actually moves back to the customer. A failure
+        // in the report/fiscalize call AFTER that point never downgrades the on-screen message
+        // (same reasoning as the successful-charge path above: the outbox durably retries the
+        // report in the background either way). But if `_softPay.refund` itself throws, no money
+        // has moved — telling staff/the customer "refunded automatically" in that case would be
+        // false, so this must show a distinct, actionable message instead.
+        var moneyRefunded = false;
+        try {
+          final refundTransaction = await _softPay.refund(
+            amountMinor: chargeAmountCents,
+            currency: _currency,
+          );
+          moneyRefunded = true;
+          await _orders.reportRefundAndFiscalize(
+            orderId: orderId,
+            amountCents: chargeAmountCents,
+            reason: 'Fiscalization rejected by TCS-D — refunded automatically',
+            transaction: toTransactionSnapshot(refundTransaction),
+          );
+        } catch (e) {
+          debugPrint(
+            'Auto-refund after fiscal rejection failed for order $orderId: $e',
+          );
+        }
+        if (mounted) {
+          setState(() {
+            _paymentStage = PaymentPanelStage.declined;
+            _paymentDetail = moneyRefunded
+                ? 'Payment could not be fiscalized — refunded automatically.'
+                : 'Payment could not be fiscalized and the automatic refund failed — call a manager, do not retry.';
+          });
+        }
+        _syncCart();
+        return;
+      }
+
       _lastOrderItems = cartSnapshot;
       _lastTransaction = transaction;
+      // Printing is gated on this being a genuine success (see the onPrint wiring below) — never
+      // print a receipt for a fiscal call that's still pending in the background or came back
+      // "unconfirmed"; SKVFS requires a confirmed registration before the receipt is issued.
+      _lastFiscal = report?.fiscal;
       if (mounted) {
         setState(() {
           _paymentStage = PaymentPanelStage.approved;
-          _paymentDetail = transaction.cardScheme == null
-              ? amountLabel
-              : '${transaction.cardScheme} · $amountLabel';
+          _paymentDetail = _lastFiscal?.success == true
+              ? (transaction.cardScheme == null
+                    ? amountLabel
+                    : '${transaction.cardScheme} · $amountLabel')
+              : 'Payment approved — finalizing fiscal record…';
           _cart.clear();
         });
       }
@@ -500,15 +559,31 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       _paymentStage = null;
       _paymentDetail = null;
       _activeAmountLabel = null;
+      _activeOrderReference = null;
       _lastOrderItems = null;
       _lastTransaction = null;
+      _lastFiscal = null;
     });
+  }
+
+  /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
+  /// strings (TCS's own format); the printer works in integer cents.
+  int _parseSwedishCents(String value) {
+    final parts = value.split(',');
+    final whole = int.tryParse(parts[0]) ?? 0;
+    final fraction = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+    final sign = whole < 0 ? -1 : 1;
+    return whole * 100 + sign * fraction;
   }
 
   Future<void> _printReceipt() async {
     final items = _lastOrderItems;
     final transaction = _lastTransaction;
-    if (items == null || transaction == null) return;
+    final fiscal = _lastFiscal;
+    // Gated on a genuine fiscal success — never print a receipt for a fiscal call that's still
+    // pending in the background or came back "unconfirmed"/rejected (see onPrint's own gating and
+    // the doc comment on _lastFiscal above).
+    if (items == null || transaction == null || fiscal == null || !fiscal.success) return;
     setState(() => _isPrinting = true);
     try {
       await _printer.printReceipt(
@@ -525,9 +600,24 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         totalCents: transaction.amountMinor,
         cardScheme: transaction.cardScheme,
         partialPan: transaction.partialPan,
+        orderReference: _activeOrderReference,
         logoBytes: DeviceIdentityService.instance.logoBytes,
         headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
         footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
+        orgNumber: fiscal.orgNr,
+        controlServerId: fiscal.controlServerId,
+        controlCode: fiscal.code,
+        sequenceNumber: fiscal.sequenceNumber,
+        vatBreakdown: fiscal.vats
+            .map(
+              (band) => ReceiptVatBand(
+                label: '${band.percent}%',
+                netCents: _parseSwedishCents(band.subtotalAmount),
+                vatCents: _parseSwedishCents(band.amount),
+              ),
+            )
+            .where((band) => band.netCents != 0 || band.vatCents != 0)
+            .toList(),
       );
     } on PrinterException catch (e) {
       if (mounted) {
@@ -698,6 +788,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                                 amountLabel:
                                     _activeAmountLabel ??
                                     '${(_totalCents / 100).toStringAsFixed(2)} $_currency',
+                                orderReference: _activeOrderReference,
                                 isPrinting: _isPrinting,
                                 onIncrement: _incrementLine,
                                 onDecrement: _decrementLine,
@@ -709,7 +800,9 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                                 onCharge: _charge,
                                 onCancelCharge: _cancelCharge,
                                 onDismissPayment: _dismissPaymentPanel,
-                                onPrint: _lastTransaction != null
+                                onPrint:
+                                    (_lastTransaction != null &&
+                                        _lastFiscal?.success == true)
                                     ? _printReceipt
                                     : null,
                               ),
@@ -885,6 +978,7 @@ class _OrderPanel extends StatelessWidget {
     required this.paymentStage,
     required this.paymentDetail,
     required this.amountLabel,
+    this.orderReference,
     required this.isPrinting,
     required this.onIncrement,
     required this.onDecrement,
@@ -906,6 +1000,7 @@ class _OrderPanel extends StatelessWidget {
   final PaymentPanelStage? paymentStage;
   final String? paymentDetail;
   final String amountLabel;
+  final String? orderReference;
   final bool isPrinting;
   final ValueChanged<CartEntry> onIncrement;
   final ValueChanged<CartEntry> onDecrement;
@@ -943,6 +1038,7 @@ class _OrderPanel extends StatelessWidget {
               ? PaymentStatusPanel(
                   stage: paymentStage!,
                   amountLabel: amountLabel,
+                  orderReference: orderReference,
                   detail: paymentDetail,
                   onCancel:
                       (paymentStage == PaymentPanelStage.connecting ||

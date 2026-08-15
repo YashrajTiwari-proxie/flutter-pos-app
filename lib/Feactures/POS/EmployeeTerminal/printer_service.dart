@@ -40,6 +40,22 @@ class ReceiptLine {
   final int subtotalCents;
 }
 
+/// One VAT-rate band for the receipt's required VAT breakdown (SKVFS
+/// 2014:9 Ch.7 §1 — every rate present on the sale must be broken out, not
+/// just a single combined total). [label] is the display rate, e.g. "25%".
+class ReceiptVatBand {
+  const ReceiptVatBand({required this.label, required this.netCents, required this.vatCents});
+
+  final String label;
+  final int netCents;
+  final int vatCents;
+}
+
+/// Whether this print is the original fiscalized receipt or a later copy.
+/// A copy must be unmistakably, non-editably marked "Kopia" — see
+/// [PrinterService.printReceipt]'s `kind` parameter.
+enum ReceiptKind { sale, copy }
+
 class _PrinterListenerAdapter extends PrinterListener {
   _PrinterListenerAdapter(this.onPrinter);
 
@@ -84,6 +100,12 @@ class PrinterService {
     Uint8List? logoBytes,
     String? headerText,
     String? footerText,
+    ReceiptKind kind = ReceiptKind.sale,
+    List<ReceiptVatBand>? vatBreakdown,
+    String? orgNumber,
+    String? controlServerId,
+    String? controlCode,
+    String? sequenceNumber,
   }) async {
     final printer = _printer;
     if (printer == null) {
@@ -114,6 +136,12 @@ class PrinterService {
       }
       if (headerText != null && headerText.isNotEmpty) {
         await line.printText(headerText, TextStyle.getStyle());
+      }
+      if (kind == ReceiptKind.copy) {
+        // SKVFS 2014:9 Ch.5 §5: a copy's marking text must be printed at
+        // least 2x the amount text's size (Total below is size 32) and
+        // must not be editable/removable by the operator.
+        await line.printText('KOPIA', TextStyle.getStyle().enableBold(true).setTextSize(64));
       }
       await line.printDividingLine(DividingLine.EMPTY, 16);
       await line.printDividingLine(DividingLine.DOTTED, 2);
@@ -150,6 +178,26 @@ class PrinterService {
         ],
       );
 
+      if (vatBreakdown != null && vatBreakdown.isNotEmpty) {
+        await line.initLine(BaseStyle.getStyle().setAlign(Align.LEFT));
+        await line.printTexts(
+          ['VAT', 'Net', 'VAT amt'],
+          [1, 1, 1],
+          [
+            TextStyle.getStyle().enableBold(true),
+            TextStyle.getStyle().enableBold(true).setAlign(Align.RIGHT),
+            TextStyle.getStyle().enableBold(true).setAlign(Align.RIGHT),
+          ],
+        );
+        for (final band in vatBreakdown) {
+          await line.printTexts(
+            [band.label, _formatCents(band.netCents, currency), _formatCents(band.vatCents, currency)],
+            [1, 1, 1],
+            [TextStyle.getStyle(), TextStyle.getStyle().setAlign(Align.RIGHT), TextStyle.getStyle().setAlign(Align.RIGHT)],
+          );
+        }
+      }
+
       if (cardScheme != null) {
         await line.initLine(BaseStyle.getStyle().setAlign(Align.LEFT));
         final panSuffix = partialPan != null ? ' •••• $partialPan' : '';
@@ -161,6 +209,26 @@ class PrinterService {
       await line.printText('Thank you!', TextStyle.getStyle());
       if (orderReference != null) {
         await line.printText(orderReference, TextStyle.getStyle().setTextSize(20));
+      }
+      // Required on every fiscal receipt (SKVFS 2014:9 Ch.7 §1) once real
+      // fiscalization data exists — printed small, at the very end, same
+      // as a receipt footer's legal fine print. The control code (kontrollkod)
+      // is the 113-character value TCS-D returns for a normal sale/refund —
+      // kopia receipts never carry one (controlCode stays null for those).
+      if (orgNumber != null || controlServerId != null || sequenceNumber != null || controlCode != null) {
+        await line.printDividingLine(DividingLine.EMPTY, 8);
+        if (orgNumber != null) {
+          await line.printText('Org.nr: $orgNumber', TextStyle.getStyle().setTextSize(16));
+        }
+        if (controlServerId != null) {
+          await line.printText('Control unit: $controlServerId', TextStyle.getStyle().setTextSize(16));
+        }
+        if (sequenceNumber != null) {
+          await line.printText('Seq: $sequenceNumber', TextStyle.getStyle().setTextSize(16));
+        }
+        if (controlCode != null) {
+          await line.printText('Control code: $controlCode', TextStyle.getStyle().setTextSize(16));
+        }
       }
       if (footerText != null && footerText.isNotEmpty) {
         await line.printDividingLine(DividingLine.EMPTY, 8);

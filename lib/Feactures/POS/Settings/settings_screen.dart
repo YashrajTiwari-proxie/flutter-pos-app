@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:kds_pos/Core/theme/theme_controller.dart';
 
+import 'About/about_pane.dart';
+import 'FiscalReports/fiscal_reports_pane.dart';
+import 'Journal/journal_pane.dart';
 import 'settings_lock_gate.dart';
 
 /// Matches the Figma Settings layout (left nav + right detail pane), but only "Appearance" is
@@ -45,6 +48,18 @@ class _SettingsScreenState extends State<_SettingsScreenContent> {
       enabled: true,
     ),
     _NavEntry(
+      icon: Icons.summarize_outlined,
+      title: 'Fiscal Reports',
+      subtitle: 'X-report / Z-report',
+      enabled: true,
+    ),
+    _NavEntry(
+      icon: Icons.menu_book_outlined,
+      title: 'Journal',
+      subtitle: 'Fiscal transaction log',
+      enabled: true,
+    ),
+    _NavEntry(
       icon: Icons.storefront_outlined,
       title: 'Your Restaurant',
       subtitle: 'Coming soon',
@@ -62,7 +77,8 @@ class _SettingsScreenState extends State<_SettingsScreenContent> {
     _NavEntry(
       icon: Icons.info_outline_rounded,
       title: 'About Us',
-      subtitle: 'Coming soon',
+      subtitle: 'Version & manufacturer info',
+      enabled: true,
     ),
   ];
 
@@ -86,11 +102,7 @@ class _SettingsScreenState extends State<_SettingsScreenContent> {
               ),
             ),
             const SizedBox(width: 24),
-            Expanded(
-              child: _selected == 0
-                  ? const _AppearancePane()
-                  : _ComingSoonPane(entry: _entries[_selected]),
-            ),
+            Expanded(child: _paneFor(_selected)),
           ],
         ),
       ),
@@ -101,6 +113,14 @@ class _SettingsScreenState extends State<_SettingsScreenContent> {
     if (!_entries[index].enabled) return;
     setState(() => _selected = index);
   }
+
+  Widget _paneFor(int index) => switch (_entries[index].title) {
+    'Appearance' => const _AppearancePane(),
+    'Fiscal Reports' => const FiscalReportsPane(),
+    'Journal' => const JournalPane(),
+    'About Us' => const AboutPane(),
+    _ => _ComingSoonPane(entry: _entries[index]),
+  };
 }
 
 class _NavList extends StatelessWidget {

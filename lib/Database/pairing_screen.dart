@@ -87,6 +87,15 @@ class _PairingScreenState extends State<PairingScreen> {
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
+                    const SizedBox(height: 20),
+                    Text(
+                      challenge.code,
+                      style: Theme.of(context).textTheme.displayMedium
+                          ?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 8,
+                          ),
+                    ),
                     const SizedBox(height: 24),
                     Container(
                       padding: const EdgeInsets.all(16),
@@ -101,15 +110,6 @@ class _PairingScreenState extends State<PairingScreen> {
                         size: 160,
                         backgroundColor: Colors.white,
                       ),
-                    ),
-                    const SizedBox(height: 20),
-                    Text(
-                      challenge.code,
-                      style: Theme.of(context).textTheme.displayMedium
-                          ?.copyWith(
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 8,
-                          ),
                     ),
                     const SizedBox(height: 20),
                     const SizedBox(
