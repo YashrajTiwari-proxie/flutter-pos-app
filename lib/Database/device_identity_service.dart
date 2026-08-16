@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import '../Core/app_mode.dart';
 import '../Core/theme/theme_controller.dart';
+import '../Services/tcs/pos_payments_service.dart';
 import 'device_hardware.dart';
 import 'remote_asset_cache.dart';
 import 'repositories/device_repository.dart';
@@ -173,6 +174,31 @@ class DeviceIdentityService {
     isPairedNotifier.value = true;
     _applyWhoAmI(info);
     _watchStatus(token);
+    // TCS-D's mandatory boot heartbeat (Infrasec certification test case 1)
+    // — only meaningful for a fiscalizing "pos" device (agentRegisterStatus
+    // is server-gated to deviceType "pos" anyway; kiosk/handheld/display/kds
+    // tokens would just get rejected). Fire-and-forget: this confirms the
+    // register is correctly bound on the TCS, but a transient failure here
+    // must never block the app from opening — see registerStatus's own doc
+    // comment.
+    if (info.deviceType == 'pos') {
+      unawaited(_reportRegisterStatus(token));
+    }
+  }
+
+  Future<void> _reportRegisterStatus(String token) async {
+    try {
+      final result = await PosPaymentsService.instance.registerStatus(
+        deviceToken: token,
+      );
+      if (!result.success) {
+        debugPrint(
+          'TCS RegisterStatus not OK: ${result.responseCode}/${result.skvResponseCode} ${result.responseMessage ?? ''}',
+        );
+      }
+    } catch (e) {
+      debugPrint('TCS RegisterStatus call failed: $e');
+    }
   }
 
   Future<void> _watchStatus(String token) async {

@@ -92,21 +92,45 @@ class PosPaymentsService {
   }
 
   /// Requests a real, fiscalized "Kopia" copy of an order's original sale
-  /// (`receipts:requestCopy`) — a genuine new TCS-D call referencing the
+  /// (`posReceipts:requestCopy`) — a genuine new TCS-D call referencing the
   /// original sale's own sequence number/dateTime, not just a local
   /// reprint. `code` on the result is always null (kopia never carries a
   /// control code); print with `ReceiptKind.copy`. No idempotency/outbox
   /// durability here — unlike a charge, a failed copy request risks
   /// nothing (no money moved), so the caller can just let staff tap
   /// reprint again.
+  ///
+  /// NOT `receipts:requestCopy` — this app's backend already has an
+  /// unrelated `receipts.ts` (Stripe/online-order PDF receipts), so the
+  /// fiscal copy action lives in its own `posReceipts.ts` file instead.
   Future<TcsResult> requestCopy({
     required String deviceToken,
     required String orderId,
   }) async {
     final raw = await ConvexClient.instance
         .action(
-          name: 'receipts:requestCopy',
+          name: 'posReceipts:requestCopy',
           args: {'deviceToken': deviceToken, 'orderId': orderId},
+        )
+        .timeout(_timeout);
+    return TcsResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  }
+
+  /// The mandatory TCS-D boot heartbeat (Infrasec's certification test case
+  /// 1: "Register status, on POS start") — calls the raw `agentRegisterStatus`
+  /// action directly rather than going through a wrapper, since it needs no
+  /// VAT math or table write of its own (unlike reportEvent/requestCopy,
+  /// which layer real orchestration on top of a raw agent action). Confirms
+  /// this restaurant's register (manRegisterId) is bound to its org (orgNr)
+  /// on the TCS — carries no control code, nothing to store in the journal.
+  /// Best-effort only: a failure here is logged, never blocks app startup —
+  /// this is a startup health check the certification test plan verifies,
+  /// not a runtime gate for real sales.
+  Future<TcsResult> registerStatus({required String deviceToken}) async {
+    final raw = await ConvexClient.instance
+        .action(
+          name: 'agentRegisterStatus:agentRegisterStatus',
+          args: {'deviceToken': deviceToken},
         )
         .timeout(_timeout);
     return TcsResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);

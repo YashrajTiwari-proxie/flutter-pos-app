@@ -55,11 +55,15 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
   /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
   /// strings (TCS's own format); the printer works in integer cents.
   int _parseSwedishCents(String value) {
-    final parts = value.split(',');
+    // Sign is read from the string itself, not the parsed `whole` value — for a magnitude under
+    // 1,00 (e.g. "-0,50"), `int.tryParse("-0")` returns 0, which is not negative, and would flip
+    // the sign to positive if this used `whole < 0` instead.
+    final isNegative = value.trim().startsWith('-');
+    final parts = value.replaceFirst('-', '').split(',');
     final whole = int.tryParse(parts[0]) ?? 0;
     final fraction = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
-    final sign = whole < 0 ? -1 : 1;
-    return whole * 100 + sign * fraction;
+    final magnitude = whole * 100 + fraction;
+    return isNegative ? -magnitude : magnitude;
   }
 
   // How long this screen (menu/cart) can sit untouched before the "are you still there?" prompt
@@ -418,11 +422,21 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
         // for good - and no cashier is present at a kiosk to notice a wrongly-declined screen,
         // which makes this even more important here than on the staff terminal.
         PosPaymentReportResult? report;
+        String? fiscalConfigError;
         try {
           report = await _orders.reportChargeAndFiscalize(
             orderId: orderId,
             amountCents: chargeAmountCents,
             transaction: toTransactionSnapshot(transaction),
+          );
+        } on ClientError_ConvexError catch (e) {
+          // A genuine, permanent backend rejection (e.g. `VAT_NOT_CONFIGURED`) — never
+          // "pending"/transient, so this must not be shown as "finalizing fiscal record…". No
+          // cashier is present at a kiosk to notice the sale is silently stuck, so surfacing the
+          // real cause here matters even more than on the staff terminal.
+          fiscalConfigError = friendlyErrorMessage(e, action: 'fiscalizing this sale');
+          debugPrint(
+            'Permanent fiscal config error reporting charge for order $orderId: $e',
           );
         } catch (e) {
           debugPrint(
@@ -473,6 +487,8 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
                   ? (transaction!.cardScheme == null
                         ? amountLabel
                         : '${transaction.cardScheme} · $amountLabel')
+                  : fiscalConfigError != null
+                  ? 'Payment approved — could not fiscalize: $fiscalConfigError'
                   : 'Payment approved — finalizing fiscal record…';
             });
           }

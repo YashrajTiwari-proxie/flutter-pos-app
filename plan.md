@@ -245,3 +245,69 @@ section, which still describes `kds_pos_backend`) covering:
   local `convex dev` deployment for each of the `pos`/`kiosk` flavours
   (`display`/handheld have no real screens yet to smoke-test beyond
   compiling) and confirm menu images render and a test order round-trips.
+
+---
+
+## Deferred: Practice ("Övning") / Proforma ("Ej kvitto") receipts — NOT SCHEDULED
+
+**Status: not planned for implementation.** Sales has no current plans for a
+Test/Training mode — this section exists only so the gap is documented
+somewhere concrete, not lost, in case Infrasec certification or a future
+sales requirement calls for it. Do not start this without an explicit ask.
+
+### Why this exists
+
+Infrasec's TCS Certification Plan (`ReDocs/4. TCS Certification Plan.pdf`)
+lists 10 required test cases for certifying a POS's TCS-D integration.
+Test cases 9 and 10 are:
+
+- **9. Practice receipt** — a training/demo sale that fiscalizes as
+  "Övning" (practice), for staff training or store demos, without counting
+  as a real sale in reports.
+- **10. Proforma receipt** — an "Ej kvitto" (not-a-receipt) preview,
+  typically for showing a customer the total before they commit to paying.
+
+Both raw TCS-D operations already exist and work: `agentExercise.ts` and
+`agentProfo.ts` in `admin-panel-v2/packages/backend/convex` are real,
+device-callable (`deviceAction(["pos"])`) actions with the correct SKV
+markers already wired in `lib/tcsXml.ts`. **Nothing calls them** except
+`test/tcs-agent.ts`, a standalone dev script — there is no Flutter UI, and
+`posPayments.ts`'s `reportEvent` action (the one real orchestration path
+every actual sale/refund goes through) only handles
+`charge | refund | failure | cancellation | unconfirmed`, with no
+practice/proforma branch. So today, a real member of staff cannot trigger
+either receipt type from the actual POS/kiosk apps.
+
+### What it would take, if ever scheduled
+
+Backend (`admin-panel-v2/packages/backend/convex`):
+- Extend `posPayments.ts`'s `reportEvent` (or add a small sibling action)
+  with `practice`/`proforma` outcome types — these never move real money
+  and never touch `orders.paymentStatus`, so the orchestration is simpler
+  than charge/refund: build VAT bands from a manually-entered amount (no
+  real order needed), call `agentExercise`/`agentProfo`, write a `fiscal`
+  row with `receiptType: "ovning"`/`"profo"` for the journal, return the
+  shaped result for printing.
+- No schema changes needed — `fiscal.receiptType`'s union already includes
+  `"ovning"`/`"profo"`.
+
+Flutter (`pos/lib`):
+- A staff-only entry point, most naturally as a small "Test / Training
+  mode" section in Settings (behind the existing settings lock — see
+  `settings_lock_gate.dart`), not a button on the live charge screen, to
+  keep it clearly separated from real sales.
+- Enter an amount + VAT rate(s) manually (no cart/order involved), pick
+  Practice or Proforma, submit, print. `printer_service.dart` already
+  supports the required on-receipt markings pattern (`ReceiptKind.copy`
+  prints "KOPIA" at 2× the amount text's size) — the same approach extends
+  to a `.practice`/`.proforma` kind printing "Övning"/"Ej kvitto".
+
+### Certification impact if left undone
+
+Cert test cases 9 and 10 would need to be demonstrated to Infrasec via the
+raw `test/tcs-agent.ts` script during the certification session itself,
+not as real POS functionality — acceptable per the cert plan's own carve-out
+("if an application would choose not to include the 'Pro forma' receipt
+function... it is not included in the certification. Only certified
+functions are allowed to be used in production."), as long as sales/legal
+are fine certifying without these two receipt types.

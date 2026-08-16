@@ -473,11 +473,22 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       // reportChargeAndFiscalize durably queues + retries this report in the background either
       // way (see its own doc comment), so losing the live result here doesn't lose the report.
       PosPaymentReportResult? report;
+      String? fiscalConfigError;
       try {
         report = await _orders.reportChargeAndFiscalize(
           orderId: orderId,
           amountCents: chargeAmountCents,
           transaction: toTransactionSnapshot(transaction),
+        );
+      } on ClientError_ConvexError catch (e) {
+        // A genuine, permanent backend rejection (e.g. `VAT_NOT_CONFIGURED` — a menu item with
+        // no VAT rate assigned) — never "pending"/transient, so this must NOT be shown as
+        // "finalizing fiscal record…", which would make staff think it'll resolve on its own.
+        // The money already moved (charge succeeded above), so this only affects the on-screen
+        // message and printability, never the charge itself.
+        fiscalConfigError = friendlyErrorMessage(e, action: 'fiscalizing this sale');
+        debugPrint(
+          'Permanent fiscal config error reporting charge for order $orderId: $e',
         );
       } catch (e) {
         debugPrint(
@@ -541,6 +552,8 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
               ? (transaction.cardScheme == null
                     ? amountLabel
                     : '${transaction.cardScheme} · $amountLabel')
+              : fiscalConfigError != null
+              ? 'Payment approved — could not fiscalize: $fiscalConfigError'
               : 'Payment approved — finalizing fiscal record…';
           _cart.clear();
         });
@@ -569,11 +582,15 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
   /// strings (TCS's own format); the printer works in integer cents.
   int _parseSwedishCents(String value) {
-    final parts = value.split(',');
+    // Sign is read from the string itself, not the parsed `whole` value — for a magnitude under
+    // 1,00 (e.g. "-0,50"), `int.tryParse("-0")` returns 0, which is not negative, and would flip
+    // the sign to positive if this used `whole < 0` instead.
+    final isNegative = value.trim().startsWith('-');
+    final parts = value.replaceFirst('-', '').split(',');
     final whole = int.tryParse(parts[0]) ?? 0;
     final fraction = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
-    final sign = whole < 0 ? -1 : 1;
-    return whole * 100 + sign * fraction;
+    final magnitude = whole * 100 + fraction;
+    return isNegative ? -magnitude : magnitude;
   }
 
   Future<void> _printReceipt() async {

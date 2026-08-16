@@ -128,7 +128,7 @@ sequenceDiagram
 
 | File | Role |
 |---|---|
-| `lib/Database/device_identity_service.dart` | `DeviceIdentityService.instance` — the single owner of this device's pairing lifecycle. `bootstrap()` calls `devices:startPairing` with a locally-generated, disk-persisted `installId` (the *only* thing persisted across restarts — the device **token** is never saved, so a revoked device is forced to re-pair on its next launch instead of silently limping along on a dead token). Returns `null` if already paired (silent), or a `PairingChallenge` (6-digit code + QR) for `PairingScreen` to show. Also owns a live `devices:whoAmI` subscription that flips `isPairedNotifier` back to `false` the instant staff revokes the device mid-session, and caches receipt/appearance/kiosk-media config from that same response (see `remoteConfigVersion`). |
+| `lib/Database/device_identity_service.dart` | `DeviceIdentityService.instance` — the single owner of this device's pairing lifecycle. `bootstrap()` calls `devices:startPairing` with a locally-generated, disk-persisted `installId` (the *only* thing persisted across restarts — the device **token** is never saved, so a revoked device is forced to re-pair on its next launch instead of silently limping along on a dead token). Returns `null` if already paired (silent), or a `PairingChallenge` (6-digit code + QR) for `PairingScreen` to show. Also owns a live `devices:whoAmI` subscription that flips `isPairedNotifier` back to `false` the instant staff revokes the device mid-session, and caches receipt/appearance/kiosk-media config from that same response (see `remoteConfigVersion`). `_finishPairing` — called on both a fresh pairing and a silent re-pair — also fires a fire-and-forget `agentRegisterStatus:agentRegisterStatus` call (via `PosPaymentsService.registerStatus`, see §14) whenever `info.deviceType == 'pos'`; a failure is only logged, never blocks the app from opening. This is Infrasec's TCS certification test case 1 ("Register status, on POS start") — kiosk/handheld/display/kds devices skip it entirely (that action is server-gated to `pos` only). |
 | `lib/Database/pairing_screen.dart` | `PairingScreen` — drives the handshake UI. Shows a spinner while `bootstrap()` resolves; if it returns a challenge, shows the code + `QrImageView` and calls `waitForClaim()`, which polls `devices:pollPairingRequest` every few seconds until staff claims it from the admin dashboard. Any thrown error (network down, etc.) shows "Device offline — retrying…" and loops `bootstrap()` again after a delay — this is the **only** offline-handling behavior in the whole app, by design. |
 | `lib/Database/repositories/device_repository.dart` | Thin Convex wrapper: `startPairing`, `pollPairingRequest`, `whoAmI`, `heartbeat`, `redeemSettingsUnlockCode`, `subscribeToStatus`. |
 | `lib/Database/device_hardware.dart` | `collectDeviceInfo()` — best-effort manufacturer/model/OS version via `device_info_plus`, for display in the admin dashboard only, never a security/lookup key. |
@@ -151,7 +151,7 @@ hash refreshed on every `whoAmI` call). See §8.
 | File | Role |
 |---|---|
 | `menu_repository.dart` | `subscribeToMenu`/`fetchMenu`/`fetchPublicMenu`. The live subscription also disk-caches the last-seen menu (keyed by **`restaurantId`**, not the device's install id or its rotating token) purely as a fast first-paint on cold start — it is never a substitute for live data; if the live subscription itself fails, that failure is surfaced as-is, never masked by silently falling back to the cache. Keying by `restaurantId` (not install id) matters: a device physically re-paired to a *different* restaurant (org has no bearing on this — see §4) must not flash that other restaurant's stale cached menu on its next cold start, which is exactly what keying by the device's own stable install id would do. |
-| `order_repository.dart` | `createOrder` (→ `orders:createDeviceOrder`, returns the **server-computed** `totalCents`/`dailyOrderNumber` — see the warning below), `reportChargeAndFiscalize`/`reportRefundAndFiscalize` (→ the centralized `posPayments:reportEvent` action, via `OrderEventOutbox.enqueueAndTryNow` — see §14), `recordPaymentFailure`/`recordPaymentUnconfirmed`/`recordCancellation` (same action, fire-and-forget via `enqueue` since none of those outcomes fiscalize), `requestReceiptCopy` (→ `receipts:requestCopy`, a genuine fiscalized "Kopia" copy — see §14/§15), `subscribeToOrders`. |
+| `order_repository.dart` | `createOrder` (→ `orders:createDeviceOrder`, returns the **server-computed** `totalCents`/`dailyOrderNumber` — see the warning below), `reportChargeAndFiscalize`/`reportRefundAndFiscalize` (→ the centralized `posPayments:reportEvent` action, via `OrderEventOutbox.enqueueAndTryNow` — see §14), `recordPaymentFailure`/`recordPaymentUnconfirmed`/`recordCancellation` (same action, fire-and-forget via `enqueue` since none of those outcomes fiscalize), `requestReceiptCopy` (→ `posReceipts:requestCopy`, a genuine fiscalized "Kopia" copy — see §14/§15), `subscribeToOrders`. |
 | `order_event_outbox.dart` | `OrderEventOutbox.instance` — a disk-backed retry queue for payment-result/refund/cancellation reports. Persists each report (with a fresh idempotency key) to `SharedPreferences` **before** attempting to send it, so an app kill or dropped connection between a successful SoftPay charge and the mutation reaching Convex can't lose the report — it's retried on the next connectivity-restore or `enqueue()` call. `enqueueAndTryNow(...)` additionally makes an immediate awaited attempt for callers that need the live result now (see §14). Both `enqueueAndTryNow` and the background `flush()` loop specifically catch `ClientError_ConvexError` (a genuine application-level rejection from the backend, e.g. `ORDER_NOT_REFUNDABLE`) — that entry is dropped immediately and the error is **rethrown**, rather than silently swallowed/retried like a transient network failure, so the caller can show staff a real error instead of the refund just silently never happening. See the file's own doc comment for the full reasoning (including a documented, fixed lost-update race and stuck-queue bug from an earlier pass — read it before touching this file). |
 | `cart_reconciliation.dart` | `reconcileCartWithMenu()` — drops any cart line whose item disappeared or went out of stock against a fresh live menu snapshot, called from both `EmployeeTerminalScreen` and `KioskMenuScreen`'s menu-subscription `onUpdate`. |
 | `remote_asset_cache.dart` | `RemoteAssetCache.instance` — disk cache for restaurant-configured media (logos, kiosk background video), keyed by URL (a re-upload always gets a new URL, so no manual invalidation needed). Atomic write-then-rename so a process kill mid-download can't leave a corrupt cache entry. |
@@ -469,9 +469,9 @@ real charge flow *is* the test path now.
 | File | Role |
 |---|---|
 | `lib/Services/tcs/tcs_models.dart` | `TcsVatBand` and `TcsResult` (the normalized fiscal result shape — mirrors the backend's `ShapedTcsResult` plus two fields the client needs for printing that aren't in the raw TCS response: `vats` (the 4 VAT bands actually sent) and `orgNr` (resolved server-side from the device's restaurant, never client-supplied)). This is the shape of `posPayments:reportEvent`'s `fiscal` field. |
-| `lib/Services/tcs/pos_payments_service.dart` | `PosPaymentsService.instance.reportEvent(...)` — the **one call** Flutter makes for any payment/refund outcome. Thin wrapper around `ConvexClient.instance.action(name: 'posPayments:reportEvent', ...)`, decoded into `PosPaymentReportResult` (`eventId`, `fiscal: TcsResult?`, `requiresRefund: bool`). `requiresRefund` is set only on a clean fiscal rejection of a charge — never on a network/timeout "unconfirmed" outcome, which might have actually succeeded on Infrasec's side and needs manual reconciliation instead of an automatic refund. |
+| `lib/Services/tcs/pos_payments_service.dart` | `PosPaymentsService.instance.reportEvent(...)` — the **one call** Flutter makes for any payment/refund outcome. Thin wrapper around `ConvexClient.instance.action(name: 'posPayments:reportEvent', ...)`, decoded into `PosPaymentReportResult` (`eventId`, `fiscal: TcsResult?`, `requiresRefund: bool`). `requiresRefund` is set only on a clean fiscal rejection of a charge — never on a network/timeout "unconfirmed" outcome, which might have actually succeeded on Infrasec's side and needs manual reconciliation instead of an automatic refund. Also `requestCopy(...)` (→ `posReceipts:requestCopy` — **not** `receipts:requestCopy`, a different, unrelated Stripe/online-order receipts file also named `receipts.ts` on the backend) and `registerStatus(...)` (→ `agentRegisterStatus:agentRegisterStatus` directly, no wrapper needed — see §4/§14). |
 | `lib/Database/repositories/order_event_outbox.dart` | `OutboxCallType` (`mutation`/`action`) lets the durable retry queue dispatch either kind of Convex call. `enqueueAndTryNow(...)` is the addition for this flow: persists to disk first (same crash-durability guarantee as plain `enqueue`), then makes an immediate awaited attempt and returns the live result — needed because a charge's caller must know the fiscal outcome *now* (to decide whether to print or auto-refund), not just fire-and-forget in the background like a failure/cancellation report. |
-| `lib/Database/repositories/order_repository.dart` | `reportChargeAndFiscalize(...)`/`reportRefundAndFiscalize(...)` — both call `enqueueAndTryNow` with `posPayments:reportEvent` (type `charge`/`refund`). Return `null` if the immediate attempt couldn't complete for a **transient** reason (still safely queued for background retry — the caller must treat this as "pending", not an error) — but now **throw** `ClientError_ConvexError` if the backend explicitly rejected the request (e.g. refunding an order that isn't `paid`/`partially_refunded` — `ORDER_NOT_REFUNDABLE`), since that's a deterministic "no" that retrying will never fix. `recordPaymentFailure`/`recordPaymentUnconfirmed`/`recordCancellation` target the same action fire-and-forget (none of those outcomes fiscalize). `requestReceiptCopy(...)` — a genuinely separate call, `receipts:requestCopy`, not routed through the outbox (no money moves on a copy request, so a failure just means "try the reprint button again," nothing to durably retry). |
+| `lib/Database/repositories/order_repository.dart` | `reportChargeAndFiscalize(...)`/`reportRefundAndFiscalize(...)` — both call `enqueueAndTryNow` with `posPayments:reportEvent` (type `charge`/`refund`). Return `null` if the immediate attempt couldn't complete for a **transient** reason (still safely queued for background retry — the caller must treat this as "pending", not an error) — but now **throw** `ClientError_ConvexError` if the backend explicitly rejected the request (e.g. refunding an order that isn't `paid`/`partially_refunded` — `ORDER_NOT_REFUNDABLE`), since that's a deterministic "no" that retrying will never fix. `recordPaymentFailure`/`recordPaymentUnconfirmed`/`recordCancellation` target the same action fire-and-forget (none of those outcomes fiscalize). `requestReceiptCopy(...)` — a genuinely separate call, `posReceipts:requestCopy`, not routed through the outbox (no money moves on a copy request, so a failure just means "try the reprint button again," nothing to durably retry). |
 
 ### The real charge flow, end to end
 
@@ -510,6 +510,27 @@ seeing no error at all on a failed refund, check whether the exception
 that surfaced really is a `ClientError_ConvexError` (dropped + rethrown
 by the outbox) as opposed to some other, still-silently-swallowed
 transient failure.
+
+### Certification test coverage (Infrasec's TCS Certification Plan)
+
+`ReDocs/4. TCS Certification Plan.pdf` (one level up from this repo) lists
+10 required test cases for certifying this app's TCS-D integration. Current
+coverage:
+
+- **Test case 1 (RegisterStatus on POS start)** — covered. See
+  `device_identity_service.dart`'s `_finishPairing`/`_reportRegisterStatus`
+  above.
+- **Test cases 2-8 (normal sale/refund/copy, every VAT rate)** — covered by
+  the real charge/refund/copy flows in §6/§9/§15.
+- **Test cases 9-10 (Practice "Övning" / Proforma "Ej kvitto" receipts)** —
+  **not reachable from the real app.** The raw TCS-D actions
+  (`agentExercise.ts`/`agentProfo.ts`) exist and work server-side, but
+  nothing calls them except a standalone dev test script — no Flutter UI,
+  no `posPayments:reportEvent` branch for either outcome. Deliberately
+  deferred (sales has no current plan for a Test/Training mode) — see
+  `plan.md`'s "Deferred: Practice/Proforma receipts" section for what it
+  would take if this is ever prioritized, and the cert plan's own carve-out
+  for shipping without every test case covered.
 
 ### Getting a real POS device token and setting up a menu item for testing
 
@@ -565,7 +586,7 @@ success — see §14) and `OrdersScreen` (reprint from history).
 or a copy — `.copy` prints a bold "KOPIA" mark at 2× the amount text's
 size (SKVFS 2014:9 Ch.5 §5's minimum), right under the header.
 `OrdersScreen`'s reprint button calls `requestReceiptCopy` (→
-`receipts:requestCopy`) **first** — a genuine new, fiscalized TCS-D
+`posReceipts:requestCopy`) **first** — a genuine new, fiscalized TCS-D
 "Kopia" call that reuses the original sale's own sequence number/dateTime
 — and only prints (with `kind: ReceiptKind.copy`) once that call actually
 returns a result; `code`/`controlCode` is always `null` on a kopia (kopia
@@ -597,6 +618,8 @@ receipts never carry a control code), which is expected, not a bug.
 | Receipt is missing the control code / sequence number | `printer_service.dart`'s `printReceipt` `controlCode`/`sequenceNumber` params — confirm the call site is passing `fiscal.code`/`fiscal.sequenceNumber` |
 | "Ticket #"/`dailyOrderNumber` missing somewhere | `order.dart`'s `Order.dailyOrderNumber` is nullable — it's cosmetic and separate from `orderNumber`/`displayId` (see §5); confirm the screen in question actually reads it rather than falling back to `displayId` alone |
 | X/Z-report or Journal "Download" button fails, or the saved file can't be found | `report_export_service.dart` — files land in `Android/data/<applicationId>/files/Reports/` (external, app-scoped storage), not the app's cache or documents directory; browse via a file manager, USB-MTP, or `adb pull` |
+| `posReceipts:requestCopy`/`agentRegisterStatus:agentRegisterStatus` "Could not find public function" | Confirm the backend actually has these under those exact names — `posReceipts.ts` (not `receipts.ts`, which is a different, unrelated Stripe file on the `new` backend repo) and the raw `agentRegisterStatus.ts` action (called directly, no wrapper) |
+| Silent failure right after pairing, or a device stuck re-showing the pairing screen | Check `device_identity_service.dart`'s `_reportRegisterStatus` isn't the cause — it's wrapped in its own try/catch and must never throw into `_finishPairing`; if pairing itself is failing, the bug is elsewhere in `bootstrap()`/`_finishPairing`, not the RegisterStatus call |
 
 ---
 

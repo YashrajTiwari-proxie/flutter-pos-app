@@ -191,11 +191,15 @@ class _OrdersScreenState extends State<OrdersScreen> {
   /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
   /// strings (TCS's own format); the printer works in integer cents.
   int _parseSwedishCents(String value) {
-    final parts = value.split(',');
+    // Sign is read from the string itself, not the parsed `whole` value — for a magnitude under
+    // 1,00 (e.g. "-0,50"), `int.tryParse("-0")` returns 0, which is not negative, and would flip
+    // the sign to positive if this used `whole < 0` instead.
+    final isNegative = value.trim().startsWith('-');
+    final parts = value.replaceFirst('-', '').split(',');
     final whole = int.tryParse(parts[0]) ?? 0;
     final fraction = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
-    final sign = whole < 0 ? -1 : 1;
-    return whole * 100 + sign * fraction;
+    final magnitude = whole * 100 + fraction;
+    return isNegative ? -magnitude : magnitude;
   }
 
   Future<int?> _promptRefundAmount(db.Order order) {
