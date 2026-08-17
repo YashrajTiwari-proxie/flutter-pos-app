@@ -444,9 +444,12 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
           );
         }
 
-        if (report?.requiresRefund == true) {
+        if (report?.requiresRefund == true || fiscalConfigError != null) {
           // No cashier here to notice or approve this - the refund must be fully automatic, same
-          // reasoning as EmployeeTerminalScreen but even more critical with nobody watching.
+          // reasoning as EmployeeTerminalScreen but even more critical with nobody watching. Both
+          // a clean TCS rejection and a permanent config error (e.g. `FISCAL_NOT_CONFIGURED`)
+          // share the same underlying risk: this sale can never be fiscalized, so the customer
+          // must not stay charged for it.
           //
           // `moneyRefunded` becomes true only once `_softPay.refund` itself returns without
           // throwing (the point money actually moves back). If that call throws, no money moved —
@@ -462,7 +465,9 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
             await _orders.reportRefundAndFiscalize(
               orderId: orderId,
               amountCents: chargeAmountCents,
-              reason: 'Fiscalization rejected by TCS-D — refunded automatically',
+              reason: fiscalConfigError != null
+                  ? 'Fiscalization not configured ($fiscalConfigError) — refunded automatically'
+                  : 'Fiscalization rejected by TCS-D — refunded automatically',
               transaction: toTransactionSnapshot(refundTransaction),
             );
           } catch (e) {

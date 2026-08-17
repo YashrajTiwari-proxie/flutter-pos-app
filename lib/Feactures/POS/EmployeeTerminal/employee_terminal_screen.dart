@@ -496,19 +496,24 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         );
       }
 
-      if (report?.requiresRefund == true) {
-        // Fiscalization was cleanly rejected (never for a null/"unconfirmed" report — that might
-        // have actually succeeded on Infrasec's side, and auto-refunding it too would risk
-        // refunding a sale that's actually fine). Refund immediately so the customer is never
-        // charged for a sale that legally couldn't be registered.
+      if (report?.requiresRefund == true || fiscalConfigError != null) {
+        // Fiscalization either was cleanly rejected by TCS, or hit a permanent config error
+        // (e.g. `VAT_NOT_CONFIGURED`/`FISCAL_NOT_CONFIGURED`) — never for a null/"unconfirmed"
+        // report, which might have actually succeeded on Infrasec's side, and auto-refunding
+        // that too would risk refunding a sale that's actually fine. Both cases share the same
+        // underlying risk: this sale can never be fiscalized, so the customer must not stay
+        // charged for it. Refund immediately rather than leaving it to a manual follow-up staff
+        // could forget.
         //
         // `moneyRefunded` is set true the instant `_softPay.refund` itself returns without
         // throwing — that's the moment the money actually moves back to the customer. A failure
         // in the report/fiscalize call AFTER that point never downgrades the on-screen message
         // (same reasoning as the successful-charge path above: the outbox durably retries the
-        // report in the background either way). But if `_softPay.refund` itself throws, no money
-        // has moved — telling staff/the customer "refunded automatically" in that case would be
-        // false, so this must show a distinct, actionable message instead.
+        // report in the background either way — and if the refund report hits the exact same
+        // permanent config error the charge did, that's expected, not a new failure). But if
+        // `_softPay.refund` itself throws, no money has moved — telling staff/the customer
+        // "refunded automatically" in that case would be false, so this must show a distinct,
+        // actionable message instead.
         var moneyRefunded = false;
         try {
           final refundTransaction = await _softPay.refund(
@@ -519,7 +524,9 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
           await _orders.reportRefundAndFiscalize(
             orderId: orderId,
             amountCents: chargeAmountCents,
-            reason: 'Fiscalization rejected by TCS-D — refunded automatically',
+            reason: fiscalConfigError != null
+                ? 'Fiscalization not configured ($fiscalConfigError) — refunded automatically'
+                : 'Fiscalization rejected by TCS-D — refunded automatically',
             transaction: toTransactionSnapshot(refundTransaction),
           );
         } catch (e) {
@@ -548,12 +555,12 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       if (mounted) {
         setState(() {
           _paymentStage = PaymentPanelStage.approved;
+          // fiscalConfigError is never set here — that case always returns early above (via the
+          // auto-refund branch), never falling through to this "approved" state.
           _paymentDetail = _lastFiscal?.success == true
               ? (transaction.cardScheme == null
                     ? amountLabel
                     : '${transaction.cardScheme} · $amountLabel')
-              : fiscalConfigError != null
-              ? 'Payment approved — could not fiscalize: $fiscalConfigError'
               : 'Payment approved — finalizing fiscal record…';
           _cart.clear();
         });
