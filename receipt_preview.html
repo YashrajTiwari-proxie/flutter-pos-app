@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Receipt Preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    background: #777;
+    margin: 0;
+    padding: 40px 0;
+    display: flex;
+    justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  .receipt {
+    width: 320px;
+    background: #fff;
+    padding: 16px 14px 28px;
+    color: #000;
+    font-size: 13px;
+    line-height: 1.35;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  }
+  .center { text-align: center; }
+  .bold { font-weight: bold; }
+  .big { font-size: 20px; }
+  .huge { font-size: 26px; }
+  .small { font-size: 11px; }
+  .header-name {
+    font-size: 18px;
+    font-weight: bold;
+    text-align: center;
+  }
+  .header-text {
+    text-align: center;
+    margin-top: 2px;
+  }
+  .address-block {
+    text-align: center;
+    margin-top: 6px;
+    font-size: 12.5px;
+  }
+  .dashed {
+    border-top: 1px dashed #000;
+    margin: 10px 0;
+  }
+  .dotted {
+    border-top: 2px dotted #000;
+    margin: 4px 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  td {
+    padding: 1px 0;
+    vertical-align: top;
+  }
+  .col-name { width: 55%; }
+  .col-qty { width: 15%; text-align: center; }
+  .col-amt { width: 30%; text-align: right; }
+  .row-head td { font-weight: bold; }
+  .total-row td {
+    font-weight: bold;
+    font-size: 20px;
+    padding-top: 4px;
+  }
+  .vat-head td { font-weight: bold; font-size: 12.5px; }
+  .vat-row td { font-size: 12.5px; }
+  .vat-col-rate { width: 34%; }
+  .vat-col-net { width: 33%; text-align: right; }
+  .vat-col-vat { width: 33%; text-align: right; }
+  .payment-line {
+    margin-top: 4px;
+  }
+  .thankyou {
+    text-align: center;
+    margin-top: 4px;
+  }
+  .order-ref {
+    text-align: center;
+    font-size: 11px;
+    margin-top: 2px;
+  }
+  .legal-block {
+    font-size: 11px;
+    margin-top: 4px;
+  }
+  .legal-block div { margin-top: 2px; }
+  .manufacturing {
+    font-size: 11px;
+    margin-top: 6px;
+  }
+  .footer-text {
+    text-align: center;
+    margin-top: 8px;
+  }
+  .kopia-marker {
+    text-align: center;
+    font-weight: bold;
+    font-size: 32px;
+    margin: 6px 0;
+  }
+  .caption {
+    max-width: 320px;
+    color: #eee;
+    font-family: sans-serif;
+    font-size: 13px;
+    text-align: center;
+    margin-top: 10px;
+  }
+  .wrap { display: flex; flex-direction: column; align-items: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="receipt">
+
+    <!-- Logo / fallback header -->
+    <div class="header-name">KDS POS</div>
+    <!-- headerText (optional free text, e.g. business tagline) -->
+    <div class="header-text">Norr One Restaurant</div>
+
+    <!-- (b) Address where sales take place, (e) Cash register designation -->
+    <div class="address-block">
+      Testgatan 12, 123 45, Farsta<br>
+      Register 1
+    </div>
+
+    <!-- Uncomment to preview a KOPIA / REFUND marking:
+    <div class="kopia-marker">KOPIA</div>
+    -->
+
+    <div class="dashed"></div>
+    <div class="dotted"></div>
+    <div class="dashed"></div>
+
+    <!-- (c) Date and time of the sale -->
+    <div>2026-08-20 14:32:07</div>
+    <div class="dashed"></div>
+
+    <!-- Items table -->
+    <table>
+      <tr class="row-head">
+        <td class="col-name">Item</td>
+        <td class="col-qty">Qty</td>
+        <td class="col-amt">Amount</td>
+      </tr>
+      <tr>
+        <td class="col-name">Cheeseburger</td>
+        <td class="col-qty">2</td>
+        <td class="col-amt">198.00 kr</td>
+      </tr>
+      <tr>
+        <td class="col-name">Fries</td>
+        <td class="col-qty">1</td>
+        <td class="col-amt">39.00 kr</td>
+      </tr>
+      <tr>
+        <td class="col-name">Cola</td>
+        <td class="col-qty">2</td>
+        <td class="col-amt">58.00 kr</td>
+      </tr>
+    </table>
+
+    <div class="dashed"></div>
+    <div class="dotted"></div>
+    <div class="dashed"></div>
+
+    <!-- Total -->
+    <table>
+      <tr class="total-row">
+        <td>Total</td>
+        <td style="text-align:right;">295.00 kr</td>
+      </tr>
+    </table>
+
+    <!-- VAT breakdown -->
+    <table style="margin-top:6px;">
+      <tr class="vat-head">
+        <td class="vat-col-rate">VAT</td>
+        <td class="vat-col-net">Net</td>
+        <td class="vat-col-vat">VAT amt</td>
+      </tr>
+      <tr class="vat-row">
+        <td class="vat-col-rate">25%</td>
+        <td class="vat-col-net">236.00 kr</td>
+        <td class="vat-col-vat">59.00 kr</td>
+      </tr>
+    </table>
+
+    <!-- (k) Means of payment -->
+    <div class="payment-line">Payment: Card (Visa •••• 4242)</div>
+
+    <div class="dashed"></div>
+
+    <div class="thankyou">Thank you!</div>
+    <div class="order-ref">Order #DAILY-0042</div>
+
+    <!-- Fiscal / control block -->
+    <div class="legal-block">
+      <div>Org.nr: 559123-4567</div>
+      <div>Control unit: TCS-D-01</div>
+      <div>Seq: 000482</div>
+      <div>Control code: 8F3A9C1D2E4B5A6F7C8D9E0F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7E8F9A0B1C2D3E4F5A6B7C8D9E</div>
+    </div>
+
+    <!-- (l) Manufacturing number of the control unit -->
+    <div class="manufacturing">Manufacturing number: NS12608061234011</div>
+
+    <!-- footerText (optional free text) -->
+    <div class="footer-text">Welcome back!</div>
+
+  </div>
+  <div class="caption">
+    1:1 preview of printer_service.dart's printReceipt() output — thermal-roll width (58mm ≈ 320px @ this scale), monospace to match the Sunmi printer's font. Dummy sale data shown; real prints substitute live values.
+  </div>
+</div>
+</body>
+</html>

@@ -86,6 +86,11 @@ class DeviceIdentityService {
   DeviceIdentity? _identity;
   String? _recoveryCodeHash;
   RestaurantReceiptConfig? _receiptConfig;
+  String? _orgNr;
+  String? _registerAddress;
+  String? _manRegisterId;
+  String? _registerDesignation;
+  DeviceCurrency? _currency;
   String? _cachedLogoUrl;
   Uint8List? _logoBytes;
   String? _kioskVideoUrl;
@@ -119,6 +124,21 @@ class DeviceIdentityService {
   /// kept current by the same live `whoAmI` subscription that watches for
   /// revocation — see `printer_service.dart`'s `printReceipt`.
   RestaurantReceiptConfig? get receiptConfig => _receiptConfig;
+
+  /// SKVFS 2014:9 Ch.7 §1 fiscal receipt fields — kept current by the same
+  /// live `whoAmI` subscription as [receiptConfig], so a correction made on
+  /// the admin dashboard (e.g. a fixed register address) reaches every
+  /// paired device without a restart. Null until the restaurant's fiscal
+  /// identity (orgNr/registerAddress/currency) or this specific device's
+  /// manRegisterId/registerDesignation have been configured — callers
+  /// should fall back to a placeholder in that case (see
+  /// `printer_service.dart`'s `printReceipt`), never to a hardcoded org's
+  /// real value.
+  String? get orgNr => _orgNr;
+  String? get registerAddress => _registerAddress;
+  String? get manRegisterId => _manRegisterId;
+  String? get registerDesignation => _registerDesignation;
+  DeviceCurrency? get currency => _currency;
 
   /// The logo's raw image bytes, fetched once per distinct `logoUrl` and
   /// cached here so a print doesn't do a network round-trip — the Sunmi
@@ -218,6 +238,11 @@ class DeviceIdentityService {
   void _applyWhoAmI(DeviceWhoAmI info) {
     _cacheRecoveryHash(info.settingsRecoveryCodeHash);
     _receiptConfig = info.receipt;
+    _orgNr = info.orgNr;
+    _registerAddress = info.registerAddress;
+    _manRegisterId = info.manRegisterId;
+    _registerDesignation = info.registerDesignation;
+    _currency = info.currency;
     _refreshLogoBytes(info.receipt?.logoUrl);
     _kioskVideoUrl = info.kioskVideoUrl;
     _refreshKioskHeaderLogoBytes(info.kioskHeaderLogoUrl);

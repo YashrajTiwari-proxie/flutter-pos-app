@@ -1,6 +1,7 @@
 import 'package:convex_flutter/convex_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:kds_pos/Database/repositories/journal_repository.dart';
+import 'package:kds_pos/Feactures/POS/EmployeeTerminal/error_state.dart';
 import 'package:kds_pos/Services/report_export_service.dart';
 
 import 'journal_entry.dart';
@@ -33,7 +34,9 @@ class _JournalPaneState extends State<JournalPane> {
           if (mounted) setState(() => _entries = entries);
         },
         onError: (message, _) {
-          if (mounted) setState(() => _error = 'Could not load the journal: $message');
+          if (mounted) {
+            setState(() => _error = 'Could not load the journal: $message');
+          }
         },
       );
     } catch (e) {
@@ -52,7 +55,9 @@ class _JournalPaneState extends State<JournalPane> {
     try {
       final path = await ReportExportService.instance.saveJournal(entries);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved to $path')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Saved to $path')));
       }
     } catch (e) {
       if (mounted) {
@@ -79,9 +84,15 @@ class _JournalPaneState extends State<JournalPane> {
                 Text('Journal', style: Theme.of(context).textTheme.titleLarge),
                 const Spacer(),
                 OutlinedButton.icon(
-                  onPressed: (entries == null || entries.isEmpty || _isSaving) ? null : () => _saveJournal(entries),
+                  onPressed: (entries == null || entries.isEmpty || _isSaving)
+                      ? null
+                      : () => _saveJournal(entries),
                   icon: _isSaving
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : const Icon(Icons.download_outlined, size: 18),
                   label: Text(_isSaving ? 'Saving…' : 'Download'),
                 ),
@@ -92,14 +103,22 @@ class _JournalPaneState extends State<JournalPane> {
               'Chronological record of every fiscal event on this register — for staff lookup or a tax inspector\'s on-demand review.',
               style: Theme.of(context).textTheme.bodyMedium,
             ),
-            if (_error != null) ...[
+            // Only shown once entries have already loaded once (stale-data-plus-error case) -
+            // the initial-load error case is handled by ErrorState below instead, so it isn't
+            // shown twice.
+            if (_error != null && entries != null) ...[
               const SizedBox(height: 12),
-              Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
             ],
             const SizedBox(height: 16),
             Expanded(
               child: entries == null
-                  ? const Center(child: CircularProgressIndicator())
+                  ? (_error != null
+                        ? ErrorState(message: _error!, onRetry: _subscribe)
+                        : SubscriptionLoadingState(onRetry: _subscribe))
                   : entries.isEmpty
                   ? Center(
                       child: Text(
@@ -110,7 +129,8 @@ class _JournalPaneState extends State<JournalPane> {
                   : ListView.separated(
                       itemCount: entries.length,
                       separatorBuilder: (_, _) => const Divider(height: 1),
-                      itemBuilder: (context, i) => _JournalTile(entry: entries[i]),
+                      itemBuilder: (context, i) =>
+                          _JournalTile(entry: entries[i]),
                     ),
             ),
           ],
@@ -147,15 +167,25 @@ class _JournalTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return ExpansionTile(
-      leading: Icon(_icon, color: entry.success ? scheme.primary : scheme.error),
+      leading: Icon(
+        _icon,
+        color: entry.success ? scheme.primary : scheme.error,
+      ),
       title: Row(
         children: [
           Text(_label, style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(width: 8),
-          Text(entry.orderReference, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+          Text(
+            entry.orderReference,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
         ],
       ),
-      subtitle: Text('${entry.timestamp} · ${(entry.amountCents / 100).toStringAsFixed(2)} SEK'),
+      subtitle: Text(
+        '${entry.timestamp} · ${(entry.amountCents / 100).toStringAsFixed(2)} SEK',
+      ),
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -163,9 +193,12 @@ class _JournalTile extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _Kv('Sequence number', entry.sequenceNumber),
-              if (entry.controlServerId != null) _Kv('Control server ID', entry.controlServerId!),
-              if (entry.controlCode != null) _Kv('Control code', entry.controlCode!, selectable: true),
-              if (entry.failureReason != null) _Kv('Reason', entry.failureReason!),
+              if (entry.controlServerId != null)
+                _Kv('Control server ID', entry.controlServerId!),
+              if (entry.controlCode != null)
+                _Kv('Control code', entry.controlCode!, selectable: true),
+              if (entry.failureReason != null)
+                _Kv('Reason', entry.failureReason!),
             ],
           ),
         ),
@@ -191,11 +224,19 @@ class _Kv extends StatelessWidget {
         children: [
           SizedBox(
             width: 140,
-            child: Text(label, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+            child: Text(
+              label,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
           ),
           Expanded(
             child: selectable
-                ? SelectableText(value, style: Theme.of(context).textTheme.bodySmall)
+                ? SelectableText(
+                    value,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  )
                 : Text(value, style: Theme.of(context).textTheme.bodySmall),
           ),
         ],

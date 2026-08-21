@@ -17,6 +17,7 @@ import 'package:kds_pos/Services/tcs/pos_payments_service.dart';
 import 'package:kds_pos/Services/tcs/tcs_models.dart';
 import 'package:kds_pos/Widgets/addon_picker_sheet.dart';
 import 'package:kds_pos/Widgets/connectivity_banner.dart';
+import 'package:kds_pos/Widgets/ordering_closed_banner.dart';
 import 'package:kds_pos/Widgets/payment_status_panel.dart';
 import 'package:uuid/uuid.dart';
 
@@ -49,8 +50,14 @@ class KioskMenuScreen extends StatefulWidget {
 }
 
 class _KioskMenuScreenState extends State<KioskMenuScreen> {
-  // Every restaurant on this backend is Swedish - same as the cashier screen.
-  static const _currency = 'SEK';
+  // Resolved from DeviceIdentityService's live whoAmI - same as the cashier
+  // screen. _currency is display-only — never send it to SoftPay, which
+  // needs a real ISO 4217 code (see _paymentCurrency); "kr" fails Currency
+  // validation on the native side.
+  String get _currency =>
+      DeviceIdentityService.instance.currency?.displaySymbol ?? 'kr';
+  String get _paymentCurrency =>
+      DeviceIdentityService.instance.currency?.isoCurrency ?? 'SEK';
 
   /// "19,63" -> 1963. The fiscal result's VAT bands are Swedish decimal-comma
   /// strings (TCS's own format); the printer works in integer cents.
@@ -81,6 +88,12 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
   List<MenuCategory>? _categories;
   String? _menuError;
   SubscriptionHandle? _menuSubscription;
+
+  // Null (or empty) means open — same "renders nothing" convention as the message itself.
+  // See OrderRepository.subscribeToOrderingStatus's doc comment for why this exists.
+  String? _orderingClosedMessage;
+  SubscriptionHandle? _orderingStatusSubscription;
+
   final Map<String, CartEntry> _cart = {};
   _KioskView _view = _KioskView.menu;
 
@@ -109,7 +122,29 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
   void initState() {
     super.initState();
     _subscribeMenu();
+    _subscribeOrderingStatus();
     _resetIdleTimer();
+  }
+
+  // Best-effort/proactive only - createOrder's own server-side
+  // requireOpenForOrders guard is the real enforcement, so a subscription
+  // failure here is silently ignored rather than blocking the screen.
+  Future<void> _subscribeOrderingStatus() async {
+    _orderingStatusSubscription?.cancel();
+    try {
+      _orderingStatusSubscription = await _orders.subscribeToOrderingStatus(
+        onUpdate: (status) {
+          if (!mounted) return;
+          setState(
+            () =>
+                _orderingClosedMessage = status.isOpen ? null : status.message,
+          );
+        },
+        onError: (_, _) {},
+      );
+    } catch (_) {
+      // See doc comment above - not surfaced to the customer.
+    }
   }
 
   // Paused while charging (a customer tapping/inserting a card isn't "touching the screen", and
@@ -271,7 +306,9 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
   }
 
   Future<void> _charge() async {
-    if (_totalCents <= 0 || _isCharging) return;
+    if (_totalCents <= 0 || _isCharging || _orderingClosedMessage != null) {
+      return;
+    }
     _isChargeInFlight =
         true; // Set synchronously, before any await - see the flag's doc comment.
     try {
@@ -361,13 +398,15 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
       try {
         transaction = await _softPay.charge(
           amountMinor: chargeAmountCents,
-          currency: _currency,
+          currency: _paymentCurrency,
         );
       } on SoftPayException catch (e) {
-        // See EmployeeTerminalScreen._charge for why TRANSACTION_INCOMPLETE/CLIENT_TIMEOUT get
-        // their own "unconfirmed" state instead of being coerced into failed.
+        // See EmployeeTerminalScreen._charge for why TRANSACTION_INCOMPLETE/CLIENT_TIMEOUT/
+        // CANCELLED_AUTO get their own "unconfirmed" state instead of being coerced into failed.
         final isUnconfirmed =
-            e.code == 'TRANSACTION_INCOMPLETE' || e.code == 'CLIENT_TIMEOUT';
+            e.code == 'TRANSACTION_INCOMPLETE' ||
+            e.code == 'CLIENT_TIMEOUT' ||
+            e.code == 'CANCELLED_AUTO';
         await (e.code == 'CANCELLED'
             ? _orders.recordCancellation(orderId: orderId)
             : isUnconfirmed
@@ -434,7 +473,10 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
           // "pending"/transient, so this must not be shown as "finalizing fiscal record…". No
           // cashier is present at a kiosk to notice the sale is silently stuck, so surfacing the
           // real cause here matters even more than on the staff terminal.
-          fiscalConfigError = friendlyErrorMessage(e, action: 'fiscalizing this sale');
+          fiscalConfigError = friendlyErrorMessage(
+            e,
+            action: 'fiscalizing this sale',
+          );
           debugPrint(
             'Permanent fiscal config error reporting charge for order $orderId: $e',
           );
@@ -459,15 +501,17 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
           try {
             final refundTransaction = await _softPay.refund(
               amountMinor: chargeAmountCents,
-              currency: _currency,
+              currency: _paymentCurrency,
             );
             moneyRefunded = true;
             await _orders.reportRefundAndFiscalize(
               orderId: orderId,
               amountCents: chargeAmountCents,
+              // See EmployeeTerminalScreen's identical comment — "requiresRefund" now covers
+              // both a clean TCS-D rejection and an unconfirmed (network/timeout) outcome.
               reason: fiscalConfigError != null
                   ? 'Fiscalization not configured ($fiscalConfigError) — refunded automatically'
-                  : 'Fiscalization rejected by TCS-D — refunded automatically',
+                  : 'Fiscalization could not be confirmed by TCS-D — refunded automatically',
               transaction: toTransactionSnapshot(refundTransaction),
             );
           } catch (e) {
@@ -523,8 +567,17 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
             partialPan: transaction.partialPan,
             orderReference: orderId,
             logoBytes: DeviceIdentityService.instance.logoBytes,
-            headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
-            footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
+            headerText:
+                DeviceIdentityService.instance.receiptConfig?.headerText,
+            companyName:
+                DeviceIdentityService.instance.identity?.restaurantName,
+            registerAddress: DeviceIdentityService.instance.registerAddress,
+            registerDesignation:
+                DeviceIdentityService.instance.registerDesignation,
+            manufacturingNumber: DeviceIdentityService.instance.manRegisterId,
+            footerText:
+                DeviceIdentityService.instance.receiptConfig?.footerText,
+            saleDateTime: DateTime.now(),
             orgNumber: fiscal.orgNr,
             controlServerId: fiscal.controlServerId,
             controlCode: fiscal.code,
@@ -574,6 +627,11 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
     _idleTimer?.cancel();
     _statusSubscription?.cancel();
     _menuSubscription?.cancel();
+    _orderingStatusSubscription?.cancel();
+    // Best-effort: see EmployeeTerminalScreen.dispose's identical call for why this is needed -
+    // without it, a screen torn down mid-charge would permanently block every future charge on
+    // this device with "BUSY". No-ops harmlessly when nothing is actually in flight.
+    unawaited(_softPay.cancelCharge());
     super.dispose();
   }
 
@@ -596,7 +654,12 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
               const _KioskBrandHeader(),
               Padding(
                 padding: _horizontalPadding.copyWith(top: 12),
-                child: const ConnectivityBanner(),
+                child: Column(
+                  children: [
+                    const ConnectivityBanner(),
+                    OrderingClosedBanner(message: _orderingClosedMessage),
+                  ],
+                ),
               ),
               Expanded(
                 child: _isCharging
@@ -624,6 +687,7 @@ class _KioskMenuScreenState extends State<KioskMenuScreen> {
                           onBackToMenu: () =>
                               setState(() => _view = _KioskView.menu),
                           onPay: _charge,
+                          orderingClosedMessage: _orderingClosedMessage,
                         ),
                       )
                     // Deliberately not padded - the banner/category rail inside need to reach
@@ -858,7 +922,7 @@ class _KioskMenuViewState extends State<_KioskMenuView> {
       if (widget.error != null) {
         return ErrorState(message: widget.error!, onRetry: widget.onRetry);
       }
-      return const Center(child: CircularProgressIndicator());
+      return SubscriptionLoadingState(onRetry: widget.onRetry);
     }
     final selectedCategory = _selectedCategory(categories);
     var items = selectedCategory == null
@@ -1744,6 +1808,7 @@ class _KioskCartView extends StatelessWidget {
     required this.onRemove,
     required this.onBackToMenu,
     required this.onPay,
+    required this.orderingClosedMessage,
   });
 
   final List<CartEntry> cart;
@@ -1754,6 +1819,9 @@ class _KioskCartView extends StatelessWidget {
   final ValueChanged<CartEntry> onRemove;
   final VoidCallback onBackToMenu;
   final VoidCallback onPay;
+  // Null (or empty) means the restaurant is open. See
+  // OrderRepository.subscribeToOrderingStatus's doc comment.
+  final String? orderingClosedMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -1910,9 +1978,14 @@ class _KioskCartView extends StatelessWidget {
                 child: ValueListenableBuilder<bool>(
                   valueListenable: ConnectivityService.instance.isOnline,
                   builder: (context, online, _) => FilledButton(
-                    onPressed: cart.isEmpty || !online ? null : onPay,
+                    onPressed:
+                        cart.isEmpty || !online || orderingClosedMessage != null
+                        ? null
+                        : onPay,
                     child: Text(
-                      online
+                      orderingClosedMessage != null
+                          ? 'Closed for ordering'
+                          : online
                           ? 'Confirm Payment · ${(totalCents / 100).toStringAsFixed(2)} $currency'
                           : 'Checkout unavailable while offline',
                     ),

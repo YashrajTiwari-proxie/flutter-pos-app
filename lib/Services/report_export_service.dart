@@ -74,7 +74,10 @@ class ReportExportService {
     buffer
       ..writeln()
       ..writeln('-- Other activity --')
-      ..writeln('Drawer openings: ${report.drawerOpenCount}')
+      // See fiscal_reports_pane.dart's identical note: card-only, no
+      // physical cash box, so these are permanently N/A, not a real zero.
+      ..writeln('Drawer openings: N/A — no cash handling')
+      ..writeln('Petty cash float: N/A — no cash handling')
       ..writeln('Receipt copies: ${report.receiptCopyCount} · ${_money(report.receiptCopyAmountCents)}')
       ..writeln('Practice-mode sales: ${report.practiceCount} · ${_money(report.practiceAmountCents)}')
       ..writeln('Returns: ${report.returnCount} · ${_money(report.returnAmountCents)}')

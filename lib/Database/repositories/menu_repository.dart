@@ -20,6 +20,11 @@ class MenuRepository {
 
   static const _cacheKeyPrefix = 'menu_cache_';
 
+  // Applied to the one-shot queries below (never to subscribeToMenu, which is long-lived by
+  // design) - without this, a Convex call that never responds would leave the awaiting caller
+  // stuck indefinitely. See order_repository.dart's identical constant/reasoning.
+  static const _timeout = Duration(seconds: 20);
+
   String get _deviceToken {
     final token = DeviceIdentityService.instance.token;
     if (token == null) {
@@ -31,9 +36,9 @@ class MenuRepository {
   }
 
   Future<List<MenuCategory>> fetchMenu() async {
-    final raw = await ConvexClient.instance.query('menu:listForDevice', {
-      'deviceToken': _deviceToken,
-    });
+    final raw = await ConvexClient.instance
+        .query('menu:listForDevice', {'deviceToken': _deviceToken})
+        .timeout(_timeout);
     final decoded = jsonDecode(raw) as List<dynamic>;
     return decoded
         .map((entry) => MenuCategory.fromJson(entry as Map<String, dynamic>))
@@ -120,9 +125,9 @@ class MenuRepository {
   /// device token, mirroring `menu:listPublic`'s own "as public as a
   /// printed menu" design on the backend.
   Future<List<MenuCategory>> fetchPublicMenu(String restaurantSlug) async {
-    final raw = await ConvexClient.instance.query('menu:listPublic', {
-      'restaurantSlug': restaurantSlug,
-    });
+    final raw = await ConvexClient.instance
+        .query('menu:listPublic', {'restaurantSlug': restaurantSlug})
+        .timeout(_timeout);
     final decoded = jsonDecode(raw) as List<dynamic>;
     return decoded
         .map((entry) => MenuCategory.fromJson(entry as Map<String, dynamic>))

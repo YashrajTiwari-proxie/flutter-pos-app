@@ -5,6 +5,7 @@ import 'package:kds_pos/Core/connectivity/connectivity_service.dart';
 import 'package:kds_pos/Database/convex_client.dart';
 import 'package:kds_pos/Database/repositories/order_event_outbox.dart';
 import 'package:kds_pos/app.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 
 // Referenced only so the customerDisplayMain() entrypoint is included in the compiled kernel -
 // the native side invokes it by name via DartExecutor.DartEntrypoint, which fails with
@@ -13,6 +14,16 @@ import 'package:kds_pos/app.dart';
 import 'package:kds_pos/Feactures/POS/CustomerTerminal/customer_display_main.dart';
 
 Future<void> main() async {
+  await SentryFlutter.init((options) {
+    // Self-hosted Bugsink instance (Sentry-protocol-compatible ingest) -
+    // not sentry.io. Crash/error reporting only for now, no session
+    // replay/perf tracing wired up, so tracesSampleRate stays at 0.
+    options.dsn = 'https://72fdc9650846489ab46a66e3eca7c12d@bugsink.weareproxie.com/7';
+    options.tracesSampleRate = 0.0;
+  }, appRunner: _startApp);
+}
+
+Future<void> _startApp() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   // Landscape is only right for the cashier/D3-mini tablet layout and the wall-mounted order

@@ -11,6 +11,24 @@ import '../models/order.dart';
 import '../models/transaction_snapshot.dart';
 import 'order_event_outbox.dart';
 
+/// Whether this restaurant is currently accepting orders — mirrors the exact guard
+/// `orders:createDeviceOrder` itself enforces server-side (`requireOpenForOrders`, shared with
+/// the online storefront's `placeOrder`), so the UI can show/disable proactively instead of
+/// staff only finding out after building a cart and tapping Charge. [message] is a real,
+/// human-readable sentence from the backend (e.g. "Closed today", "Outside business hours",
+/// "This restaurant isn't taking orders right now") — never a code to re-translate client-side.
+class OrderingStatus {
+  const OrderingStatus({required this.isOpen, this.message});
+
+  factory OrderingStatus.fromJson(Map<String, dynamic> json) => OrderingStatus(
+    isOpen: json['isOpen'] as bool,
+    message: json['message'] as String?,
+  );
+
+  final bool isOpen;
+  final String? message;
+}
+
 /// Result of `orders:createDeviceOrder`. [totalCents] is re-derived server-side from the live
 /// menu/addons/coupon/delivery-zone tables — this, not any client-side cart sum, is the amount
 /// that must be passed to `SoftPayService.charge()`. Trusting a locally-computed total instead
@@ -47,6 +65,7 @@ class CreateOrderResult {
 
   final String orderId;
   final String displayId;
+
   /// Cosmetic, resets daily per restaurant — never the fiscal record. See
   /// backend schema.ts's `orders.dailyOrderNumber` doc comment.
   final int? dailyOrderNumber;
@@ -64,6 +83,15 @@ class OrderRepository {
   OrderRepository._();
 
   static final OrderRepository instance = OrderRepository._();
+
+  // Applied to every one-shot query/mutation below (never to subscribeToOrders, which is
+  // long-lived by design) - without this, a Convex call that genuinely never responds (not an
+  // error, a network black-hole) would leave an `await` here unresolved forever. For createOrder
+  // specifically that means _isChargeInFlight/_isBusy staying true permanently - cart edits
+  // blocked, Charge disabled, no Cancel button either (that's gated on a payment stage this path
+  // never reaches) - with a force-restart as the only recovery. See device_repository.dart's
+  // identical constant/reasoning.
+  static const _timeout = Duration(seconds: 20);
 
   String get _deviceToken {
     final token = DeviceIdentityService.instance.token;
@@ -97,6 +125,34 @@ class OrderRepository {
     );
   }
 
+  /// Live feed of whether this restaurant is currently open for orders
+  /// (`restaurants:getOrderingStatusBySlug`) — proactive, so the UI can
+  /// show a banner and disable Charge before staff ever builds a cart,
+  /// instead of only finding out when `createOrder` rejects it. This is
+  /// the same public, unauthenticated query the online storefront uses
+  /// (no device token involved — restaurantSlug is enough), reused here
+  /// rather than adding a device-scoped duplicate.
+  Future<SubscriptionHandle> subscribeToOrderingStatus({
+    required void Function(OrderingStatus status) onUpdate,
+    required void Function(String message, dynamic details) onError,
+  }) {
+    final restaurantSlug =
+        DeviceIdentityService.instance.identity?.restaurantSlug;
+    if (restaurantSlug == null) {
+      throw StateError(
+        'Device is not paired — call DeviceIdentityService.pair() first',
+      );
+    }
+    return ConvexClient.instance.subscribe(
+      name: 'restaurants:getOrderingStatusBySlug',
+      args: {'restaurantSlug': restaurantSlug},
+      onUpdate: (raw) => onUpdate(
+        OrderingStatus.fromJson(jsonDecode(raw) as Map<String, dynamic>),
+      ),
+      onError: onError,
+    );
+  }
+
   /// Creates a walk-in order for this device's restaurant. `customerName`
   /// defaults to "Walk-in" server-side when omitted — there's no customer
   /// account behind a POS/kiosk/handheld order.
@@ -113,25 +169,27 @@ class OrderRepository {
     String? notes,
     String? customerName,
   }) async {
-    final raw = await ConvexClient.instance.mutation(
-      name: 'orders:createDeviceOrder',
-      args: {
-        'deviceToken': _deviceToken,
-        'idempotencyKey': idempotencyKey,
-        'items': items.map((item) => item.toJson()).toList(),
-        'fulfillmentType': fulfillmentType,
-        if (scheduledFor != null)
-          'scheduledFor': scheduledFor.millisecondsSinceEpoch,
-        'orderType': orderType,
-        if (locationId != null) 'locationId': locationId,
-        if (couponCode != null) 'couponCode': couponCode,
-        'paymentMethod': paymentMethod,
-        if (deliveryPostalCode != null)
-          'deliveryPostalCode': deliveryPostalCode,
-        if (notes != null) 'notes': notes,
-        if (customerName != null) 'customerName': customerName,
-      },
-    );
+    final raw = await ConvexClient.instance
+        .mutation(
+          name: 'orders:createDeviceOrder',
+          args: {
+            'deviceToken': _deviceToken,
+            'idempotencyKey': idempotencyKey,
+            'items': items.map((item) => item.toJson()).toList(),
+            'fulfillmentType': fulfillmentType,
+            if (scheduledFor != null)
+              'scheduledFor': scheduledFor.millisecondsSinceEpoch,
+            'orderType': orderType,
+            if (locationId != null) 'locationId': locationId,
+            if (couponCode != null) 'couponCode': couponCode,
+            'paymentMethod': paymentMethod,
+            if (deliveryPostalCode != null)
+              'deliveryPostalCode': deliveryPostalCode,
+            if (notes != null) 'notes': notes,
+            if (customerName != null) 'customerName': customerName,
+          },
+        )
+        .timeout(_timeout);
     return CreateOrderResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
@@ -164,7 +222,9 @@ class OrderRepository {
       idempotencyKey: const Uuid().v4(),
     );
     if (raw == null) return null;
-    return PosPaymentReportResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    return PosPaymentReportResult.fromJson(
+      jsonDecode(raw) as Map<String, dynamic>,
+    );
   }
 
   Future<void> recordPaymentFailure({
@@ -173,16 +233,12 @@ class OrderRepository {
     required String message,
     int? detailedCode,
   }) {
-    return OrderEventOutbox.instance.enqueue(
-      'posPayments:reportEvent',
-      {
-        'orderId': orderId,
-        'type': 'failure',
-        'failureCode': code,
-        'failureMessage': message,
-      },
-      callType: OutboxCallType.action,
-    );
+    return OrderEventOutbox.instance.enqueue('posPayments:reportEvent', {
+      'orderId': orderId,
+      'type': 'failure',
+      'failureCode': code,
+      'failureMessage': message,
+    }, callType: OutboxCallType.action);
   }
 
   /// The SDK itself could not determine whether the charge went through (e.g. Softpay's
@@ -195,16 +251,12 @@ class OrderRepository {
     String? message,
     int? detailedCode,
   }) {
-    return OrderEventOutbox.instance.enqueue(
-      'posPayments:reportEvent',
-      {
-        'orderId': orderId,
-        'type': 'unconfirmed',
-        'failureCode': code ?? 'UNCONFIRMED',
-        'failureMessage': message ?? 'Payment outcome could not be confirmed',
-      },
-      callType: OutboxCallType.action,
-    );
+    return OrderEventOutbox.instance.enqueue('posPayments:reportEvent', {
+      'orderId': orderId,
+      'type': 'unconfirmed',
+      'failureCode': code ?? 'UNCONFIRMED',
+      'failureMessage': message ?? 'Payment outcome could not be confirmed',
+    }, callType: OutboxCallType.action);
   }
 
   /// Reports a refund and fiscalizes it in one call — same durability/live-result reasoning as
@@ -231,15 +283,16 @@ class OrderRepository {
       idempotencyKey: const Uuid().v4(),
     );
     if (raw == null) return null;
-    return PosPaymentReportResult.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    return PosPaymentReportResult.fromJson(
+      jsonDecode(raw) as Map<String, dynamic>,
+    );
   }
 
   Future<void> recordCancellation({required String orderId}) {
-    return OrderEventOutbox.instance.enqueue(
-      'posPayments:reportEvent',
-      {'orderId': orderId, 'type': 'cancellation'},
-      callType: OutboxCallType.action,
-    );
+    return OrderEventOutbox.instance.enqueue('posPayments:reportEvent', {
+      'orderId': orderId,
+      'type': 'cancellation',
+    }, callType: OutboxCallType.action);
   }
 
   /// Requests a real, fiscalized "Kopia" copy of an order's original sale — see
@@ -247,7 +300,10 @@ class OrderRepository {
   /// original sale to copy, etc.); the caller must not print anything in that case.
   Future<TcsResult?> requestReceiptCopy({required String orderId}) async {
     try {
-      return await PosPaymentsService.instance.requestCopy(deviceToken: _deviceToken, orderId: orderId);
+      return await PosPaymentsService.instance.requestCopy(
+        deviceToken: _deviceToken,
+        orderId: orderId,
+      );
     } catch (_) {
       return null;
     }

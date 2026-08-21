@@ -16,10 +16,18 @@ class FiscalReportsRepository {
 
   static final FiscalReportsRepository instance = FiscalReportsRepository._();
 
+  // Applied to generateZReport (never to the subscriptions below, which are long-lived by
+  // design) - without this, a Convex call that never responds would leave the "Generate
+  // Z-report" button stuck mid-tap indefinitely. See order_repository.dart's identical
+  // constant/reasoning.
+  static const _timeout = Duration(seconds: 20);
+
   String get _deviceToken {
     final token = DeviceIdentityService.instance.token;
     if (token == null) {
-      throw StateError('Device is not paired — call DeviceIdentityService.pair() first');
+      throw StateError(
+        'Device is not paired — call DeviceIdentityService.pair() first',
+      );
     }
     return token;
   }
@@ -32,7 +40,10 @@ class FiscalReportsRepository {
       name: 'fiscalReports:xReportForDevice',
       args: {'deviceToken': _deviceToken},
       onUpdate: (raw) => onUpdate(
-        FiscalReport.fromJson(jsonDecode(raw) as Map<String, dynamic>, kind: FiscalReportKind.x),
+        FiscalReport.fromJson(
+          jsonDecode(raw) as Map<String, dynamic>,
+          kind: FiscalReportKind.x,
+        ),
       ),
       onError: onError,
     );
@@ -51,7 +62,10 @@ class FiscalReportsRepository {
         onUpdate(
           decoded == null
               ? null
-              : FiscalReport.fromJson(decoded as Map<String, dynamic>, kind: FiscalReportKind.z),
+              : FiscalReport.fromJson(
+                  decoded as Map<String, dynamic>,
+                  kind: FiscalReportKind.z,
+                ),
         );
       },
       onError: onError,
@@ -62,10 +76,15 @@ class FiscalReportsRepository {
   /// none) as a new, formally numbered Z-report. Deliberately not something
   /// the UI calls automatically — this is a staff-initiated day-close action.
   Future<FiscalReport> generateZReport() async {
-    final raw = await ConvexClient.instance.mutation(
-      name: 'fiscalReports:generateZReportForDevice',
-      args: {'deviceToken': _deviceToken},
+    final raw = await ConvexClient.instance
+        .mutation(
+          name: 'fiscalReports:generateZReportForDevice',
+          args: {'deviceToken': _deviceToken},
+        )
+        .timeout(_timeout);
+    return FiscalReport.fromJson(
+      jsonDecode(raw) as Map<String, dynamic>,
+      kind: FiscalReportKind.z,
     );
-    return FiscalReport.fromJson(jsonDecode(raw) as Map<String, dynamic>, kind: FiscalReportKind.z);
   }
 }

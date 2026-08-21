@@ -20,6 +20,7 @@ import 'package:kds_pos/Widgets/app_header_bar.dart';
 import 'package:kds_pos/Widgets/app_sidebar.dart';
 import 'package:kds_pos/Widgets/category_tab_bar.dart';
 import 'package:kds_pos/Widgets/connectivity_banner.dart';
+import 'package:kds_pos/Widgets/ordering_closed_banner.dart';
 import 'package:kds_pos/Widgets/dish_tile.dart';
 import 'package:kds_pos/Widgets/order_type_pills.dart';
 import 'package:kds_pos/Widgets/payment_status_panel.dart';
@@ -42,9 +43,17 @@ class EmployeeTerminalScreen extends StatefulWidget {
 
 class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     with RouteAware {
-  // Every restaurant on this backend is Swedish (see admin-panel-v2's
-  // stockholmTime.ts) — orders carry no currency field of their own.
-  static const _currency = 'SEK';
+  // Resolved from DeviceIdentityService's live whoAmI (backend's
+  // lib/currency.ts, driven by restaurants.countryCode) — 'SE'/SEK/kr as a
+  // fallback only for an unconfigured restaurant or before the first
+  // whoAmI response lands. _currency is display-only (receipt/screen
+  // totals) — never send it to SoftPay, which needs a real ISO 4217 code
+  // (see _paymentCurrency); sending "kr" there fails Currency validation
+  // on the native side.
+  String get _currency =>
+      DeviceIdentityService.instance.currency?.displaySymbol ?? 'kr';
+  String get _paymentCurrency =>
+      DeviceIdentityService.instance.currency?.isoCurrency ?? 'SEK';
 
   final _softPay = SoftPayService.instance;
   final _menuRepository = MenuRepository.instance;
@@ -61,6 +70,11 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   String? _menuError;
   SubscriptionHandle? _menuSubscription;
 
+  // Null (or empty) means open — same "renders nothing" convention as the message itself.
+  // See OrderRepository.subscribeToOrderingStatus's doc comment for why this exists.
+  String? _orderingClosedMessage;
+  SubscriptionHandle? _orderingStatusSubscription;
+
   // Keyed by CartEntry.cartKey, insertion order preserved for a stable cart display.
   final Map<String, CartEntry> _cart = {};
 
@@ -75,6 +89,10 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   List<CartEntry>? _lastOrderItems;
   TransactionResult? _lastTransaction;
   TcsResult? _lastFiscal;
+  // SKVFS 2014:9 Ch.7 §1 (c) date/time of sale — captured the moment the
+  // charge succeeds, not later at print time, so a delayed print still
+  // shows the actual sale time.
+  DateTime? _lastSaleDateTime;
   bool _isPrinting = false;
 
   // _paymentStage alone isn't set until partway through `_charge()` (after the connectivity
@@ -93,6 +111,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   void initState() {
     super.initState();
     _subscribeMenu();
+    _subscribeOrderingStatus();
   }
 
   @override
@@ -155,6 +174,30 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
               _menuError = friendlyErrorMessage(e, action: 'loading the menu'),
         );
       }
+    }
+  }
+
+  // Best-effort/proactive only - createOrder's own server-side
+  // requireOpenForOrders guard is the real enforcement (see _runCharge's
+  // connectivity-check comment for the same reasoning), so a subscription
+  // failure here is silently ignored rather than blocking the screen -
+  // staff can still attempt to charge, and the server-side guard catches
+  // it if the restaurant really is closed.
+  Future<void> _subscribeOrderingStatus() async {
+    _orderingStatusSubscription?.cancel();
+    try {
+      _orderingStatusSubscription = await _orders.subscribeToOrderingStatus(
+        onUpdate: (status) {
+          if (!mounted) return;
+          setState(
+            () =>
+                _orderingClosedMessage = status.isOpen ? null : status.message,
+          );
+        },
+        onError: (_, _) {},
+      );
+    } catch (_) {
+      // See doc comment above - not surfaced to staff.
     }
   }
 
@@ -312,7 +355,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
   }
 
   Future<void> _charge() async {
-    if (_totalCents <= 0 || _isBusy) return;
+    if (_totalCents <= 0 || _isBusy || _orderingClosedMessage != null) return;
     _isChargeInFlight =
         true; // Set synchronously, before any await - see the flag's doc comment.
     try {
@@ -411,15 +454,20 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       try {
         transaction = await _softPay.charge(
           amountMinor: chargeAmountCents,
-          currency: _currency,
+          currency: _paymentCurrency,
         );
       } on SoftPayException catch (e) {
-        // TRANSACTION_INCOMPLETE/CLIENT_TIMEOUT mean the SDK (or this app's own watchdog -
-        // see SoftPayService) couldn't determine whether the charge went through - recorded as
-        // its own "unconfirmed" state (never "failed", which would risk a double-charge on
-        // retry if it actually succeeded) for staff to reconcile manually.
+        // TRANSACTION_INCOMPLETE/CLIENT_TIMEOUT/CANCELLED_AUTO mean the SDK (or this app's own
+        // watchdog - see SoftPayService) couldn't determine whether the charge went through -
+        // recorded as its own "unconfirmed" state (never "failed", which would risk a
+        // double-charge on retry if it actually succeeded) for staff to reconcile manually.
+        // CANCELLED_AUTO specifically means the terminal itself gave up waiting for the
+        // authorization host's response - the actual outcome on the bank's side is unknown, not
+        // a clean decline.
         final isUnconfirmed =
-            e.code == 'TRANSACTION_INCOMPLETE' || e.code == 'CLIENT_TIMEOUT';
+            e.code == 'TRANSACTION_INCOMPLETE' ||
+            e.code == 'CLIENT_TIMEOUT' ||
+            e.code == 'CANCELLED_AUTO';
         await (e.code == 'CANCELLED'
             ? _orders.recordCancellation(orderId: orderId)
             : isUnconfirmed
@@ -486,7 +534,10 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         // "finalizing fiscal record…", which would make staff think it'll resolve on its own.
         // The money already moved (charge succeeded above), so this only affects the on-screen
         // message and printability, never the charge itself.
-        fiscalConfigError = friendlyErrorMessage(e, action: 'fiscalizing this sale');
+        fiscalConfigError = friendlyErrorMessage(
+          e,
+          action: 'fiscalizing this sale',
+        );
         debugPrint(
           'Permanent fiscal config error reporting charge for order $orderId: $e',
         );
@@ -518,17 +569,74 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         try {
           final refundTransaction = await _softPay.refund(
             amountMinor: chargeAmountCents,
-            currency: _currency,
+            currency: _paymentCurrency,
           );
           moneyRefunded = true;
-          await _orders.reportRefundAndFiscalize(
+          final refundReport = await _orders.reportRefundAndFiscalize(
             orderId: orderId,
             amountCents: chargeAmountCents,
+            // "requiresRefund" now covers both a clean TCS-D rejection and an
+            // unconfirmed (network/timeout) outcome (SKVFS 2014:9 Ch.4 §9 —
+            // never leave a sale registered without confirmed control-system
+            // communication) — the message stays accurate for either.
             reason: fiscalConfigError != null
                 ? 'Fiscalization not configured ($fiscalConfigError) — refunded automatically'
-                : 'Fiscalization rejected by TCS-D — refunded automatically',
+                : 'Fiscalization could not be confirmed by TCS-D — refunded automatically',
             transaction: toTransactionSnapshot(refundTransaction),
           );
+          // Best-effort only: this refund exists specifically because the original sale could
+          // never be fiscalized, so the refund's own fiscal call very often hits the exact same
+          // permanent error (see the reasoning above `moneyRefunded`) — print only when it
+          // genuinely succeeded, never block/alarm staff over a printer skip here.
+          final refundFiscal = refundReport?.fiscal;
+          if (refundFiscal != null && refundFiscal.success) {
+            try {
+              await _printer.printReceipt(
+                items: [
+                  ReceiptLine(
+                    name: 'Refund',
+                    quantity: 1,
+                    subtotalCents: chargeAmountCents,
+                  ),
+                ],
+                currency: _currency,
+                totalCents: chargeAmountCents,
+                orderReference: _activeOrderReference,
+                logoBytes: DeviceIdentityService.instance.logoBytes,
+                headerText:
+                    DeviceIdentityService.instance.receiptConfig?.headerText,
+                companyName:
+                    DeviceIdentityService.instance.identity?.restaurantName,
+                registerAddress: DeviceIdentityService.instance.registerAddress,
+                registerDesignation:
+                    DeviceIdentityService.instance.registerDesignation,
+                manufacturingNumber:
+                    DeviceIdentityService.instance.manRegisterId,
+                footerText:
+                    DeviceIdentityService.instance.receiptConfig?.footerText,
+                saleDateTime: DateTime.now(),
+                kind: ReceiptKind.refund,
+                orgNumber: refundFiscal.orgNr,
+                controlServerId: refundFiscal.controlServerId,
+                controlCode: refundFiscal.code,
+                sequenceNumber: refundFiscal.sequenceNumber,
+                vatBreakdown: refundFiscal.vats
+                    .map(
+                      (band) => ReceiptVatBand(
+                        label: '${band.percent}%',
+                        netCents: _parseSwedishCents(band.subtotalAmount),
+                        vatCents: _parseSwedishCents(band.amount),
+                      ),
+                    )
+                    .where((band) => band.netCents != 0 || band.vatCents != 0)
+                    .toList(),
+              );
+            } on PrinterException catch (e) {
+              debugPrint(
+                'Auto-refund receipt print failed for order $orderId: $e',
+              );
+            }
+          }
         } catch (e) {
           debugPrint(
             'Auto-refund after fiscal rejection failed for order $orderId: $e',
@@ -548,6 +656,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
 
       _lastOrderItems = cartSnapshot;
       _lastTransaction = transaction;
+      _lastSaleDateTime = DateTime.now();
       // Printing is gated on this being a genuine success (see the onPrint wiring below) — never
       // print a receipt for a fiscal call that's still pending in the background or came back
       // "unconfirmed"; SKVFS requires a confirmed registration before the receipt is issued.
@@ -583,6 +692,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
       _lastOrderItems = null;
       _lastTransaction = null;
       _lastFiscal = null;
+      _lastSaleDateTime = null;
     });
   }
 
@@ -604,10 +714,16 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     final items = _lastOrderItems;
     final transaction = _lastTransaction;
     final fiscal = _lastFiscal;
+    final saleDateTime = _lastSaleDateTime ?? DateTime.now();
     // Gated on a genuine fiscal success — never print a receipt for a fiscal call that's still
     // pending in the background or came back "unconfirmed"/rejected (see onPrint's own gating and
     // the doc comment on _lastFiscal above).
-    if (items == null || transaction == null || fiscal == null || !fiscal.success) return;
+    if (items == null ||
+        transaction == null ||
+        fiscal == null ||
+        !fiscal.success) {
+      return;
+    }
     setState(() => _isPrinting = true);
     try {
       await _printer.printReceipt(
@@ -627,7 +743,12 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
         orderReference: _activeOrderReference,
         logoBytes: DeviceIdentityService.instance.logoBytes,
         headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
+        companyName: DeviceIdentityService.instance.identity?.restaurantName,
+        registerAddress: DeviceIdentityService.instance.registerAddress,
+        registerDesignation: DeviceIdentityService.instance.registerDesignation,
+        manufacturingNumber: DeviceIdentityService.instance.manRegisterId,
         footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
+        saleDateTime: saleDateTime,
         orgNumber: fiscal.orgNr,
         controlServerId: fiscal.controlServerId,
         controlCode: fiscal.code,
@@ -701,7 +822,14 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
     _screenFocusScope.dispose();
     _statusSubscription?.cancel();
     _menuSubscription?.cancel();
+    _orderingStatusSubscription?.cancel();
     _searchController.dispose();
+    // Best-effort: if this screen goes away mid-charge/refund (navigation, a crash-recovery
+    // path), the native side's job would otherwise never be told to stop and would permanently
+    // block every future charge/refund on this device with "BUSY" (see SoftPayService.charge's
+    // identical cleanup on its own watchdog timeout for the full reasoning). No-ops harmlessly
+    // when nothing is actually in flight.
+    unawaited(_softPay.cancelCharge());
     super.dispose();
   }
 
@@ -738,6 +866,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   const ConnectivityBanner(),
+                  OrderingClosedBanner(message: _orderingClosedMessage),
                   Expanded(
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -804,6 +933,7 @@ class _EmployeeTerminalScreenState extends State<EmployeeTerminalScreen>
                                 totalCents: _totalCents,
                                 currency: _currency,
                                 isBusy: _isBusy,
+                                orderingClosedMessage: _orderingClosedMessage,
                                 orderType: _orderType,
                                 onOrderTypeChanged: (type) =>
                                     setState(() => _orderType = type),
@@ -884,7 +1014,7 @@ class _MenuPanelState extends State<_MenuPanel> {
       if (widget.error != null) {
         return ErrorState(message: widget.error!, onRetry: widget.onRetry);
       }
-      return const Center(child: CircularProgressIndicator());
+      return SubscriptionLoadingState(onRetry: widget.onRetry);
     }
     final allItems = categories.expand((category) => category.items).toList();
     if (allItems.isEmpty) {
@@ -997,6 +1127,7 @@ class _OrderPanel extends StatelessWidget {
     required this.totalCents,
     required this.currency,
     required this.isBusy,
+    required this.orderingClosedMessage,
     required this.orderType,
     required this.onOrderTypeChanged,
     required this.paymentStage,
@@ -1019,6 +1150,9 @@ class _OrderPanel extends StatelessWidget {
   final int totalCents;
   final String currency;
   final bool isBusy;
+  // Null (or empty) means the restaurant is open. See
+  // OrderRepository.subscribeToOrderingStatus's doc comment.
+  final String? orderingClosedMessage;
   final OrderType orderType;
   final ValueChanged<OrderType> onOrderTypeChanged;
   final PaymentPanelStage? paymentStage;
@@ -1115,21 +1249,7 @@ class _OrderPanel extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'Discount',
-                          style: Theme.of(context).textTheme.bodyMedium,
-                        ),
-                        Text(
-                          '\$0',
-                          style: Theme.of(context).textTheme.bodyMedium,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Sub total',
+                          'Total',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         Text(
@@ -1142,11 +1262,16 @@ class _OrderPanel extends StatelessWidget {
                     SizedBox(
                       height: 56,
                       child: FilledButton(
-                        onPressed: (!isBusy && totalCents > 0)
+                        onPressed:
+                            (!isBusy &&
+                                totalCents > 0 &&
+                                orderingClosedMessage == null)
                             ? onCharge
                             : null,
                         child: Text(
-                          'Charge ${(totalCents / 100).toStringAsFixed(2)} $currency',
+                          orderingClosedMessage != null
+                              ? 'Closed for ordering'
+                              : 'Charge ${(totalCents / 100).toStringAsFixed(2)} $currency',
                         ),
                       ),
                     ),

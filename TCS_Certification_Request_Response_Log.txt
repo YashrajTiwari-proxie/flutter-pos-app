@@ -1,0 +1,542 @@
+TCS-D CERTIFICATION — REQUEST/RESPONSE LOG
+Generated locally against Infrasec's Verify environment (https://tcs-verify.infrasec-api.se)
+Register identity: OrgNr 2608061234 / ManRegisterID NS12608061234011 / RegisterAddress "Testgatan 12, 123 45, Farsta"
+ApplicationID: NorrSpectPOS
+Format follows "TCS Certification Examples" (Doc ID 1002, v1.2)
+
+================================================================================
+1) Register status (on POS start)
+================================================================================
+Condition: RegisterStatus API call, on POS application start.
+
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>5c86f4d8-a1db-49b5-ae7f-267f2d90ce99</RequestID>
+  <RegisterStatus>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+  </RegisterStatus>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>5c86f4d8-a1db-49b5-ae7f-267f2d90ce99</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+</TcsResponse>
+
+================================================================================
+2) Normal sale with 25% VAT rate
+================================================================================
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>28b2c669-acab-4c4b-83d9-5f22f677b576</RequestID>
+  <ControlData>
+    <DateTime>20260818184130</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000110</SequenceNumber>
+    <ReceiptType Type="normal"/>
+    <SaleAmount>100,00</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>20,00</Amount>
+      <SubtotalAmount>80,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>28b2c669-acab-4c4b-83d9-5f22f677b576</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000110</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code>NFVJBRWLIVAM2DTG6DYJ3A7EPUZN2EKS;GNU5LVKTJKVPH4DMGFNSDHKTB623NDJVAH4S3YJQZMMDVPZVAFY5Y34FFVX7NNJQWYNAAR4MAOGNW===</Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+3) Normal sale with 12% VAT rate
+================================================================================
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>33344f5f-fcbe-49d4-9565-067847e0eea5</RequestID>
+  <ControlData>
+    <DateTime>20260818183936</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000102</SequenceNumber>
+    <ReceiptType Type="normal"/>
+    <SaleAmount>100,00</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>10,71</Amount>
+      <SubtotalAmount>89,29</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>33344f5f-fcbe-49d4-9565-067847e0eea5</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000102</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code>4GQ5BNXVXY7YFXUUD435L6SZ274VCQMG;AC2MGNIRQKNUWAR4AHRWJQKJ75TDJFN3D3V66QN5GKBLTTKY5YLFZ2RWWCK6OWPXS3M7VEDCU2VB4===</Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+4) Normal sale with 6% VAT rate
+================================================================================
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>d748f9d1-d8fe-4edb-b565-fbea3497d88f</RequestID>
+  <ControlData>
+    <DateTime>20260818183948</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000103</SequenceNumber>
+    <ReceiptType Type="normal"/>
+    <SaleAmount>100,00</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>5,66</Amount>
+      <SubtotalAmount>94,34</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>d748f9d1-d8fe-4edb-b565-fbea3497d88f</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000103</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code>4DSD6UWIBNZ5FTZJUSLR7FZEGPAJDINZ;AZ6RB756IVSPHA2IH45KELQALP5YROKP55JBJ4XWYILMHHCZTNYOPAK4REXDZS7XWWR6IO7MXN6X6===</Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+5) Normal sale with 0% VAT rate
+================================================================================
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>63158415-742d-434c-a904-dabd7541d820</RequestID>
+  <ControlData>
+    <DateTime>20260818183958</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000104</SequenceNumber>
+    <ReceiptType Type="normal"/>
+    <SaleAmount>100,00</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>0,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>100,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>63158415-742d-434c-a904-dabd7541d820</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000104</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code>KBRAZJ3NBX6ODU6Z5YAIEQH2XKX67JWC;ET7JFBWDM743ZHV3KVVMQZCOADR2EJQHI2HQ7NR2RCSY3UIRL4WPJPPI7IPABQLL6ESZX4VXMW4VC===</Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+6) Normal sale with 25%, 12%, 6%, 0% VAT rate
+================================================================================
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>406c6fa5-2c00-431f-ac31-098ee5fb4088</RequestID>
+  <ControlData>
+    <DateTime>20260818184010</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000105</SequenceNumber>
+    <ReceiptType Type="normal"/>
+    <SaleAmount>110,75</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>6,25</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>3,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>1,50</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>406c6fa5-2c00-431f-ac31-098ee5fb4088</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000105</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code>LSJYMJSSN7Z5W765M3YASURWOCRR4S7J;C5KCJYYE6JCGOHQSSDTJQQQTHSKZMCESGCPT64KW7GT5C4A4WFWGPTXIG6XLKIUXCEJXSVJA442PG===</Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+7) Normal refund with 25%, 12%, 6%, 0% VAT rate
+================================================================================
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>28acc085-959a-4fad-a060-1749086d15bf</RequestID>
+  <ControlData>
+    <DateTime>20260818184028</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000106</SequenceNumber>
+    <ReceiptType Type="normal"/>
+    <RefundAmount>110,75</RefundAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>6,25</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>3,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>1,50</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>28acc085-959a-4fad-a060-1749086d15bf</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000106</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code>QPYLM2HBFNZYC3V7KZ2B2QQEPVMH2LQP;PA6JJDGKDFYRBC25SJEG7O4Z3SQCMB3GU4X722IMD7N2C6BQAEYP3BK7QPU6M2IZKL5IEHTKIBUMQ===</Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+8) Receipt copy with 25%, 12%, 6%, 0% VAT rate
+================================================================================
+Note: this is a "kopia" of test case 6's sale (SequenceNumber 279000000105,
+DateTime 20260818184010) — CopySequenceNumber/CopyDateTime reference that
+original receipt. Per TCS-D's own contract for this receipt type, the
+response carries an empty <Code/> — a copy is never issued a new fiscal
+control code.
+
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>77ba6e03-038f-4291-ad59-939ab0f76c16</RequestID>
+  <ControlData>
+    <DateTime>20260818184041</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000107</SequenceNumber>
+    <CopySequenceNumber>279000000105</CopySequenceNumber>
+    <CopyDateTime>20260818184010</CopyDateTime>
+    <ReceiptType Type="kopia"/>
+    <SaleAmount>110,75</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>6,25</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>3,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>1,50</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>77ba6e03-038f-4291-ad59-939ab0f76c16</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000105</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code></Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+9) Practice receipt with 25%, 12%, 6%, 0% VAT rate
+================================================================================
+Note: ReceiptType "ovning" ("Övning" / Practice). Per TCS-D's contract for
+this receipt type, the response carries an empty <Code/> — a practice
+receipt is never issued a real fiscal control code.
+
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>ecbad883-5cd1-45b7-bf2c-35b8426fac3e</RequestID>
+  <ControlData>
+    <DateTime>20260818184055</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000108</SequenceNumber>
+    <ReceiptType Type="ovning"/>
+    <SaleAmount>110,75</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>6,25</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>3,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>1,50</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>ecbad883-5cd1-45b7-bf2c-35b8426fac3e</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000108</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code></Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+10) Proforma receipt with 25%, 12%, 6%, 0% VAT rate
+================================================================================
+Note: ReceiptType "profo" ("Ej kvitto" / Proforma). Per TCS-D's contract for
+this receipt type, the response carries an empty <Code/> — a proforma
+receipt is never issued a real fiscal control code.
+
+Request:
+<TcsRequest>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>17531a42-7dc4-442d-83d9-e5ab2679506c</RequestID>
+  <ControlData>
+    <DateTime>20260818184105</DateTime>
+    <OrgNr>2608061234</OrgNr>
+    <ManRegisterID>NS12608061234011</ManRegisterID>
+    <RegisterAddress>Testgatan 12, 123 45, Farsta</RegisterAddress>
+    <SequenceNumber>279000000109</SequenceNumber>
+    <ReceiptType Type="profo"/>
+    <SaleAmount>110,75</SaleAmount>
+    <VAT1>
+      <Percent>25,00</Percent>
+      <Amount>6,25</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT1>
+    <VAT2>
+      <Percent>12,00</Percent>
+      <Amount>3,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT2>
+    <VAT3>
+      <Percent>6,00</Percent>
+      <Amount>1,50</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT3>
+    <VAT4>
+      <Percent>0,00</Percent>
+      <Amount>0,00</Amount>
+      <SubtotalAmount>25,00</SubtotalAmount>
+    </VAT4>
+  </ControlData>
+</TcsRequest>
+
+Response:
+<TcsResponse>
+  <ResponseCode>0</ResponseCode>
+  <ResponseMessage>Success</ResponseMessage>
+  <ResponseReason>Success</ResponseReason>
+  <ApplicationID>NorrSpectPOS</ApplicationID>
+  <RequestID>17531a42-7dc4-442d-83d9-e5ab2679506c</RequestID>
+  <SKVResponseCode>STATUS_OK</SKVResponseCode>
+  <SKVResponseMessage>Kvitto får skrivas ut</SKVResponseMessage>
+  <SequenceNumber>279000000109</SequenceNumber>
+  <ControlCode>
+    <ControlServerID>ISTCSKSVERIFY0001</ControlServerID>
+    <Code></Code>
+  </ControlCode>
+</TcsResponse>
+
+================================================================================
+Checklist cross-reference (per "TCS Certification Examples" §1)
+================================================================================
+- RegisterID (Kassabeteckning): NS12608061234011 — present in every ControlData request as ManRegisterID.
+- Receipt number / sequence number (Kvittonummer): unique per test case (279000000101-110), all within one register's number sequence.
+- Organization number: 2608061234 — consistent across every request/response.
+- VAT percent and VAT amount: present in every request (VAT1-4) and mathematically reconciled against SaleAmount/RefundAmount (SubtotalAmount + Amount summed across all 4 bands equals the sale/refund total in every case).
+- ControlServerID (Kontrollserverns id): ISTCSKSVERIFY0001 for every ControlData response, matching between request context and TCS response in each case.
+- ControlCode: present (113-char format) for test cases 2-7 (real sales/refund); empty as contractually expected for test cases 8-10 (kopia/ovning/profo).

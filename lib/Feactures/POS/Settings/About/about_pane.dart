@@ -6,6 +6,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:kds_pos/Database/device_identity_service.dart';
 
 /// Manufacturer name declared on this software's SKV manufacturer's
 /// declaration — must match that document exactly (see
@@ -69,6 +70,15 @@ class _AboutPaneState extends State<AboutPane> {
               _InfoRow(label: 'Software version', value: info.version),
               _InfoRow(label: 'Build number', value: info.buildNumber),
               _InfoRow(label: 'Package', value: info.packageName),
+              // SKVFS 2014:9 Ch.4 §6: a cash register program not locked to a
+              // specific physical unit must itself carry a unique serial
+              // number. installId already exists (device_identity_service.dart)
+              // as a stable per-install identifier — this is the first place
+              // it's shown to a person rather than staying internal plumbing.
+              _InfoRow(
+                label: 'Serial number',
+                value: DeviceIdentityService.instance.installId ?? 'Not yet assigned',
+              ),
             ],
           ],
         ),

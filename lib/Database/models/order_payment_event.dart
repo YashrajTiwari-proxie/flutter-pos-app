@@ -33,6 +33,7 @@ class OrderPaymentEvent {
     this.failureMessage,
     this.reason,
     required this.createdAt,
+    this.hasReceiptCopy = false,
   });
 
   factory OrderPaymentEvent.fromJson(Map<String, dynamic> json) {
@@ -48,6 +49,7 @@ class OrderPaymentEvent {
       failureMessage: json['failureMessage'] as String?,
       reason: json['reason'] as String?,
       createdAt: DateTime.fromMillisecondsSinceEpoch((json['createdAt'] as num).toInt()),
+      hasReceiptCopy: json['hasReceiptCopy'] as bool? ?? false,
     );
   }
 
@@ -60,4 +62,9 @@ class OrderPaymentEvent {
   final String? failureMessage;
   final String? reason;
   final DateTime createdAt;
+  // Set server-side once a "kopia" copy has been issued against this charge
+  // event (see posReceipts.ts's requestCopy) — SKVFS 2014:9 Ch.6 §3 permits
+  // at most one copy per receipt, so the Print button is disabled once this
+  // is true rather than relying only on the server rejecting a retry.
+  final bool hasReceiptCopy;
 }

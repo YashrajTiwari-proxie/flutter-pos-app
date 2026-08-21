@@ -7,6 +7,7 @@
 import 'package:convex_flutter/convex_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:kds_pos/Database/repositories/fiscal_reports_repository.dart';
+import 'package:kds_pos/Feactures/POS/EmployeeTerminal/error_state.dart';
 import 'package:kds_pos/Services/report_export_service.dart';
 
 import 'fiscal_report_models.dart';
@@ -44,7 +45,9 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
           if (mounted) setState(() => _xReport = report);
         },
         onError: (message, _) {
-          if (mounted) setState(() => _error = 'Could not load X-report: $message');
+          if (mounted) {
+            setState(() => _error = 'Could not load X-report: $message');
+          }
         },
       );
       _zSubscription = await _repository.subscribeToLatestZReport(
@@ -52,7 +55,9 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
           if (mounted) setState(() => _zReport = report);
         },
         onError: (message, _) {
-          if (mounted) setState(() => _error = 'Could not load Z-report: $message');
+          if (mounted) {
+            setState(() => _error = 'Could not load Z-report: $message');
+          }
         },
       );
     } catch (e) {
@@ -74,9 +79,9 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
       if (mounted) setState(() => _zReport = report);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Could not generate Z-report: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not generate Z-report: $e')),
+        );
       }
     } finally {
       if (mounted) setState(() => _isGenerating = false);
@@ -88,7 +93,9 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
     try {
       final path = await ReportExportService.instance.saveFiscalReport(report);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved to $path')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Saved to $path')));
       }
     } catch (e) {
       if (mounted) {
@@ -112,12 +119,21 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
           children: [
             Row(
               children: [
-                Text('Fiscal Reports', style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  'Fiscal Reports',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const Spacer(),
                 SegmentedButton<FiscalReportKind>(
                   segments: const [
-                    ButtonSegment(value: FiscalReportKind.x, label: Text('X-Report')),
-                    ButtonSegment(value: FiscalReportKind.z, label: Text('Z-Report')),
+                    ButtonSegment(
+                      value: FiscalReportKind.x,
+                      label: Text('X-Report'),
+                    ),
+                    ButtonSegment(
+                      value: FiscalReportKind.z,
+                      label: Text('Z-Report'),
+                    ),
                   ],
                   selected: {_kind},
                   onSelectionChanged: (s) => setState(() => _kind = s.first),
@@ -134,15 +150,29 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
                     child: FilledButton.icon(
                       onPressed: _isGenerating ? null : _generateZReport,
                       icon: _isGenerating
-                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
                           : const Icon(Icons.lock_clock_outlined, size: 18),
-                      label: Text(_isGenerating ? 'Generating…' : 'Generate Z-report (close day)'),
+                      label: Text(
+                        _isGenerating
+                            ? 'Generating…'
+                            : 'Generate Z-report (close day)',
+                      ),
                     ),
                   ),
                 OutlinedButton.icon(
-                  onPressed: (report == null || _isSaving) ? null : () => _saveReport(report),
+                  onPressed: (report == null || _isSaving)
+                      ? null
+                      : () => _saveReport(report),
                   icon: _isSaving
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : const Icon(Icons.download_outlined, size: 18),
                   label: Text(_isSaving ? 'Saving…' : 'Download'),
                 ),
@@ -150,19 +180,31 @@ class _FiscalReportsPaneState extends State<FiscalReportsPane> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
-              Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
             ],
             const SizedBox(height: 16),
             Expanded(
               child: report == null
-                  ? Center(
-                      child: Text(
-                        _kind == FiscalReportKind.z
-                            ? 'No Z-report generated yet for this restaurant.'
-                            : 'Loading…',
-                        style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                    )
+                  ? (_kind == FiscalReportKind.z
+                        // A brand-new restaurant with zero Z-reports yet is a legitimate,
+                        // permanent empty state - never swap this for a spinner/retry.
+                        ? Center(
+                            child: Text(
+                              'No Z-report generated yet for this restaurant.',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                          )
+                        // X-report is always a live computed value - null here means the
+                        // subscription's first value hasn't arrived yet, not "nothing to show".
+                        : (_error != null
+                              ? ErrorState(
+                                  message: _error!,
+                                  onRetry: _subscribe,
+                                )
+                              : SubscriptionLoadingState(onRetry: _subscribe)))
                   : SingleChildScrollView(child: _ReportBody(report: report)),
             ),
           ],
@@ -185,11 +227,16 @@ class _ReportBody extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionHeader(report.kind == FiscalReportKind.x ? 'X-Report (running totals)' : 'Z-Report (day close)'),
+        _SectionHeader(
+          report.kind == FiscalReportKind.x
+              ? 'X-Report (running totals)'
+              : 'Z-Report (day close)',
+        ),
         _Kv('Company', report.companyName),
         _Kv('Org. number', report.orgNumber),
         _Kv('Register designation', report.registerDesignation),
-        if (report.reportNumber != null) _Kv('Report number', '#${report.reportNumber}'),
+        if (report.reportNumber != null)
+          _Kv('Report number', '#${report.reportNumber}'),
         _Kv('Generated', report.generatedAt.toString()),
         const SizedBox(height: 20),
         _SectionHeader('Sales'),
@@ -200,18 +247,40 @@ class _ReportBody extends StatelessWidget {
         const SizedBox(height: 20),
         _SectionHeader('VAT breakdown'),
         for (final band in report.vatBreakdown)
-          _Kv('VAT ${band.label} (net ${money(band.netCents)})', money(band.vatCents)),
+          _Kv(
+            'VAT ${band.label} (net ${money(band.netCents)})',
+            money(band.vatCents),
+          ),
         const SizedBox(height: 20),
         _SectionHeader('Payment methods'),
-        for (final pm in report.paymentMethods) _Kv('${pm.method} (${pm.count})', money(pm.amountCents)),
+        for (final pm in report.paymentMethods)
+          _Kv('${pm.method} (${pm.count})', money(pm.amountCents)),
         const SizedBox(height: 20),
         _SectionHeader('Other activity'),
-        _Kv('Drawer openings', '${report.drawerOpenCount}'),
-        _Kv('Receipt copies', '${report.receiptCopyCount} · ${money(report.receiptCopyAmountCents)}'),
-        _Kv('Practice-mode sales', '${report.practiceCount} · ${money(report.practiceAmountCents)}'),
-        _Kv('Returns', '${report.returnCount} · ${money(report.returnAmountCents)}'),
+        // NorrSpect POS is card-only — there is no physical cash box, so
+        // "drawer openings" and "petty cash float" (SKVFS 2014:9 Ch.7 §2/§3)
+        // are permanently not applicable rather than a tracked value that
+        // happens to be zero. Shown explicitly rather than omitted so the
+        // printed/exported report still answers every required line.
+        _Kv('Drawer openings', 'N/A — no cash handling'),
+        _Kv('Petty cash float', 'N/A — no cash handling'),
+        _Kv(
+          'Receipt copies',
+          '${report.receiptCopyCount} · ${money(report.receiptCopyAmountCents)}',
+        ),
+        _Kv(
+          'Practice-mode sales',
+          '${report.practiceCount} · ${money(report.practiceAmountCents)}',
+        ),
+        _Kv(
+          'Returns',
+          '${report.returnCount} · ${money(report.returnAmountCents)}',
+        ),
         _Kv('Discounts', money(report.discountAmountCents)),
-        _Kv('Uncompleted sales', '${report.uncompletedSaleCount} · ${money(report.uncompletedSaleAmountCents)}'),
+        _Kv(
+          'Uncompleted sales',
+          '${report.uncompletedSaleCount} · ${money(report.uncompletedSaleAmountCents)}',
+        ),
       ],
     );
   }
@@ -225,7 +294,12 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 8),
-    child: Text(text, style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+    child: Text(
+      text,
+      style: Theme.of(
+        context,
+      ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+    ),
   );
 }
 
@@ -242,8 +316,20 @@ class _Kv extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 6),
       child: Row(
         children: [
-          Expanded(child: Text(label, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant))),
-          Text(value, style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+          Expanded(
+            child: Text(
+              label,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ),
+          Text(
+            value,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+          ),
         ],
       ),
     );

@@ -49,6 +49,14 @@ class OrderEventOutbox {
   // server hiccup (a couple of retries covers that).
   static const _maxOnlineAttempts = 3;
 
+  // `posPayments:reportEvent` (the only action queued here) makes a real TCS-D HTTP call
+  // server-side, capped at 15s by the backend's own TCS_TIMEOUT_MS - this must stay comfortably
+  // above that so a genuinely-slow-but-successful TCS round trip is never client-side-timed-out
+  // out from under it. Without any bound here, a Convex call that never responds (not an error -
+  // a network black-hole) would leave enqueueAndTryNow's `await _send(...)` unresolved forever,
+  // sticking whatever payment stage the caller set (e.g. "connecting…") with no way out.
+  static const _sendTimeout = Duration(seconds: 25);
+
   bool _flushing = false;
   bool _wired = false;
 
@@ -180,9 +188,10 @@ class OrderEventOutbox {
       'idempotencyKey': idempotencyKey,
       ...args,
     };
-    return callType == OutboxCallType.action
+    final future = callType == OutboxCallType.action
         ? ConvexClient.instance.action(name: name, args: fullArgs)
         : ConvexClient.instance.mutation(name: name, args: fullArgs);
+    return future.timeout(_sendTimeout);
   }
 
   /// Attempts to send every queued entry, in order, stopping once the head of the queue fails

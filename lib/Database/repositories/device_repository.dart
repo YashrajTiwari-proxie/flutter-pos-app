@@ -46,6 +46,25 @@ class RestaurantReceiptConfig {
   final String? footerText;
 }
 
+/// Resolved display/payment currency for this restaurant (see the backend's
+/// `lib/currency.ts`) — `isoCurrency` (e.g. "SEK") for real SoftPay charge/
+/// refund calls, `displaySymbol` (e.g. "kr") for on-screen/printed labels.
+/// Never hardcode one to derive the other; always read both from here.
+class DeviceCurrency {
+  const DeviceCurrency({
+    required this.isoCurrency,
+    required this.displaySymbol,
+  });
+
+  factory DeviceCurrency.fromJson(Map<String, dynamic> json) => DeviceCurrency(
+    isoCurrency: json['isoCurrency'] as String,
+    displaySymbol: json['displaySymbol'] as String,
+  );
+
+  final String isoCurrency;
+  final String displaySymbol;
+}
+
 /// Result of `devices:whoAmI` — lets a freshly-paired device self-configure
 /// (which restaurant, which device type) without a second staff-driven
 /// lookup.
@@ -60,6 +79,11 @@ class DeviceWhoAmI {
     this.receipt,
     this.kioskVideoUrl,
     this.kioskHeaderLogoUrl,
+    this.orgNr,
+    this.registerAddress,
+    this.manRegisterId,
+    this.registerDesignation,
+    this.currency,
   });
 
   factory DeviceWhoAmI.fromJson(Map<String, dynamic> json) => DeviceWhoAmI(
@@ -80,6 +104,13 @@ class DeviceWhoAmI {
         : null,
     kioskVideoUrl: json['kioskVideoUrl'] as String?,
     kioskHeaderLogoUrl: json['kioskHeaderLogoUrl'] as String?,
+    orgNr: json['orgNr'] as String?,
+    registerAddress: json['registerAddress'] as String?,
+    manRegisterId: json['manRegisterId'] as String?,
+    registerDesignation: json['registerDesignation'] as String?,
+    currency: json['currency'] != null
+        ? DeviceCurrency.fromJson(json['currency'] as Map<String, dynamic>)
+        : null,
   );
 
   final String restaurantId;
@@ -104,6 +135,18 @@ class DeviceWhoAmI {
   /// The kiosk ordering screen's own top-bar logo - deliberately separate from
   /// `receipt.logoStorageId`. Null when unset (falls back to a plain storefront icon).
   final String? kioskHeaderLogoUrl;
+
+  /// SKVFS 2014:9 Ch.7 §1 fiscal receipt fields — real per-restaurant/
+  /// per-device values (see printer_service.dart's printReceipt), resolved
+  /// server-side from `restaurants.fiscalIdentity`/`devices.manRegisterId`/
+  /// `devices.registerDesignation`. Null only if the restaurant hasn't had
+  /// its fiscal identity configured yet, or (for the two device-scoped
+  /// fields) staff hasn't set them for this specific device yet.
+  final String? orgNr;
+  final String? registerAddress;
+  final String? manRegisterId;
+  final String? registerDesignation;
+  final DeviceCurrency? currency;
 }
 
 /// Result of `devices:startPairing` — either this hardware was already an

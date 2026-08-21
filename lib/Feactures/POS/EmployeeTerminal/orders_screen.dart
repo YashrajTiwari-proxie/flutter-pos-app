@@ -19,9 +19,15 @@ class OrdersScreen extends StatefulWidget {
   State<OrdersScreen> createState() => _OrdersScreenState();
 }
 
-// Every restaurant on this backend is Swedish — orders carry no currency
-// field of their own (see employee_terminal_screen.dart's same constant).
-const _currency = 'SEK';
+// Resolved from DeviceIdentityService's live whoAmI - same as
+// employee_terminal_screen.dart's identical getters. _currency is
+// display-only — never send it to SoftPay, which needs a real ISO 4217
+// code (see _paymentCurrency); "kr" fails Currency validation on the
+// native side.
+String get _currency =>
+    DeviceIdentityService.instance.currency?.displaySymbol ?? 'kr';
+String get _paymentCurrency =>
+    DeviceIdentityService.instance.currency?.isoCurrency ?? 'SEK';
 
 enum _OrderFilter { all, pending, paid, failed, refunded }
 
@@ -39,6 +45,12 @@ class _OrdersScreenState extends State<OrdersScreen> {
   StreamSubscription<PaymentStatusUpdate>? _statusSubscription;
 
   final Set<String> _printingOrderIds = {};
+
+  // Orders whose most recent refund attempt moved money but failed to fiscalize — session-local
+  // only (no backend field tracks this yet, see plan.md's "Refund fiscal retry" entry), so a
+  // fresh app launch forgets this and would need the order re-checked manually before allowing
+  // another refund attempt on it.
+  final Set<String> _refundFiscalIssues = {};
 
   @override
   void initState() {
@@ -61,11 +73,20 @@ class _OrdersScreenState extends State<OrdersScreen> {
         },
         onError: (message, _) {
           if (!mounted) return;
-          setState(() => _error = friendlyErrorMessage(message, action: 'loading orders'));
+          setState(
+            () => _error = friendlyErrorMessage(
+              message,
+              action: 'loading orders',
+            ),
+          );
         },
       );
     } catch (e) {
-      if (mounted) setState(() => _error = friendlyErrorMessage(e, action: 'loading orders'));
+      if (mounted) {
+        setState(
+          () => _error = friendlyErrorMessage(e, action: 'loading orders'),
+        );
+      }
     }
   }
 
@@ -82,34 +103,131 @@ class _OrdersScreenState extends State<OrdersScreen> {
     if (!mounted) return;
 
     setState(() => _refunding[order.id] = null);
-    _statusSubscription = SoftPayService.instance.statusUpdates.listen((update) {
+    _statusSubscription = SoftPayService.instance.statusUpdates.listen((
+      update,
+    ) {
       if (mounted) setState(() => _refunding[order.id] = update);
     });
 
     try {
       final transaction = await SoftPayService.instance.refund(
         amountMinor: amountCents,
-        currency: _currency,
+        currency: _paymentCurrency,
         posReferenceNumber: order.id,
       );
       // Fiscalizes the refund itself (agentRefund-backed) — the SoftPay refund already moved the
       // money regardless of what this returns, so a null/failed report here is never treated as
       // the refund itself failing (same reasoning as EmployeeTerminalScreen's charge path). The
       // live subscription above will push the updated order once Convex applies it either way.
-      await _orders.reportRefundAndFiscalize(
+      final report = await _orders.reportRefundAndFiscalize(
         orderId: order.id,
         amountCents: amountCents,
         transaction: toTransactionSnapshot(transaction),
       );
+      final refundFiscal = report?.fiscal;
+      // Only print when the refund itself actually fiscalized — same gating EmployeeTerminalScreen
+      // uses for a sale receipt (SKVFS requires a confirmed registration before a receipt is issued).
+      if (refundFiscal != null && refundFiscal.success) {
+        try {
+          await PrinterService.instance.printReceipt(
+            items: [
+              ReceiptLine(
+                name: 'Refund',
+                quantity: 1,
+                subtotalCents: amountCents,
+              ),
+            ],
+            currency: _currency,
+            totalCents: amountCents,
+            orderReference: order.displayId,
+            logoBytes: DeviceIdentityService.instance.logoBytes,
+            headerText:
+                DeviceIdentityService.instance.receiptConfig?.headerText,
+            companyName:
+                DeviceIdentityService.instance.identity?.restaurantName,
+            registerAddress: DeviceIdentityService.instance.registerAddress,
+            registerDesignation:
+                DeviceIdentityService.instance.registerDesignation,
+            manufacturingNumber: DeviceIdentityService.instance.manRegisterId,
+            footerText:
+                DeviceIdentityService.instance.receiptConfig?.footerText,
+            saleDateTime: DateTime.now(),
+            kind: ReceiptKind.refund,
+            orgNumber: refundFiscal.orgNr,
+            controlServerId: refundFiscal.controlServerId,
+            controlCode: refundFiscal.code,
+            sequenceNumber: refundFiscal.sequenceNumber,
+            vatBreakdown: refundFiscal.vats
+                .map(
+                  (band) => ReceiptVatBand(
+                    label: '${band.percent}%',
+                    netCents: _parseSwedishCents(band.subtotalAmount),
+                    vatCents: _parseSwedishCents(band.amount),
+                  ),
+                )
+                .where((band) => band.netCents != 0 || band.vatCents != 0)
+                .toList(),
+          );
+        } on PrinterException catch (e) {
+          if (mounted) {
+            final issue =
+                friendlyPrinterIssue(e.code) ??
+                e.message ??
+                'Could not print the refund receipt';
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(issue)));
+          }
+        }
+      } else {
+        // The money has already moved via SoftPay above regardless — only the TCS-D fiscal
+        // record is missing/rejected here. There is currently no safe way to retry just the
+        // fiscal half without risking a second real SoftPay refund (see plan.md's "Refund fiscal
+        // retry" entry), so this order is flagged to block further refund attempts from this
+        // screen and staff must be told plainly instead of silently getting no receipt.
+        _refundFiscalIssues.add(order.id);
+        if (mounted) {
+          await showDialog<void>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              icon: Icon(
+                Icons.warning_amber_rounded,
+                color: Theme.of(dialogContext).colorScheme.error,
+              ),
+              title: const Text('Refund needs manual follow-up'),
+              content: const Text(
+                'The money has been refunded to the customer, but the fiscal receipt for this '
+                'refund could not be generated by Skatteverket\'s system. No receipt was printed. '
+                'This needs manual reconciliation before end-of-day close-out — do not attempt to '
+                'refund this order again from this screen.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        }
+      }
     } on SoftPayException catch (e) {
       if (mounted) {
         await showDialog<void>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            icon: Icon(Icons.error_outline, color: Theme.of(dialogContext).colorScheme.error),
+            icon: Icon(
+              Icons.error_outline,
+              color: Theme.of(dialogContext).colorScheme.error,
+            ),
             title: const Text('Refund failed'),
             content: Text(friendlySoftPayMessage(e.message)),
-            actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('OK'))],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       }
@@ -118,10 +236,18 @@ class _OrdersScreenState extends State<OrdersScreen> {
         await showDialog<void>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            icon: Icon(Icons.error_outline, color: Theme.of(dialogContext).colorScheme.error),
+            icon: Icon(
+              Icons.error_outline,
+              color: Theme.of(dialogContext).colorScheme.error,
+            ),
             title: const Text('Refund not saved'),
             content: Text(friendlyErrorMessage(e, action: 'saving the refund')),
-            actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('OK'))],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       }
@@ -143,7 +269,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
       if (fiscal == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not fiscalize a copy — try again')),
+            const SnackBar(
+              content: Text('Could not fiscalize a copy — try again'),
+            ),
           );
         }
         return;
@@ -152,7 +280,13 @@ class _OrdersScreenState extends State<OrdersScreen> {
       final charge = order.latestCharge;
       await PrinterService.instance.printReceipt(
         items: order.items
-            .map((item) => ReceiptLine(name: item.name, quantity: item.quantity, subtotalCents: item.subtotalCents))
+            .map(
+              (item) => ReceiptLine(
+                name: item.name,
+                quantity: item.quantity,
+                subtotalCents: item.subtotalCents,
+              ),
+            )
             .toList(),
         currency: _currency,
         totalCents: order.totalCents,
@@ -161,7 +295,12 @@ class _OrdersScreenState extends State<OrdersScreen> {
         orderReference: order.displayId,
         logoBytes: DeviceIdentityService.instance.logoBytes,
         headerText: DeviceIdentityService.instance.receiptConfig?.headerText,
+        companyName: DeviceIdentityService.instance.identity?.restaurantName,
+        registerAddress: DeviceIdentityService.instance.registerAddress,
+        registerDesignation: DeviceIdentityService.instance.registerDesignation,
+        manufacturingNumber: DeviceIdentityService.instance.manRegisterId,
         footerText: DeviceIdentityService.instance.receiptConfig?.footerText,
+        saleDateTime: order.placedAt,
         kind: ReceiptKind.copy,
         orgNumber: fiscal.orgNr,
         controlServerId: fiscal.controlServerId,
@@ -180,8 +319,13 @@ class _OrdersScreenState extends State<OrdersScreen> {
       );
     } on PrinterException catch (e) {
       if (mounted) {
-        final issue = friendlyPrinterIssue(e.code) ?? e.message ?? 'Could not print the receipt';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(issue)));
+        final issue =
+            friendlyPrinterIssue(e.code) ??
+            e.message ??
+            'Could not print the receipt';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(issue)));
       }
     } finally {
       if (mounted) setState(() => _printingOrderIds.remove(order.id));
@@ -203,7 +347,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
   }
 
   Future<int?> _promptRefundAmount(db.Order order) {
-    final controller = TextEditingController(text: (order.refundableCents / 100).toStringAsFixed(2));
+    final controller = TextEditingController(
+      text: (order.refundableCents / 100).toStringAsFixed(2),
+    );
     return showDialog<int>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -211,14 +357,19 @@ class _OrdersScreenState extends State<OrdersScreen> {
         content: TextField(
           controller: controller,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(suffixText: _currency),
+          decoration: InputDecoration(suffixText: _currency),
           autofocus: true,
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
             onPressed: () {
-              final value = double.tryParse(controller.text.replaceAll(',', '.'));
+              final value = double.tryParse(
+                controller.text.replaceAll(',', '.'),
+              );
               if (value == null || value <= 0) return;
               final cents = (value * 100).round();
               if (cents > order.refundableCents) return;
@@ -242,7 +393,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
       case _OrderFilter.failed:
         return order.paymentStatus == 'failed';
       case _OrderFilter.refunded:
-        return order.paymentStatus == 'refunded' || order.paymentStatus == 'partially_refunded';
+        return order.paymentStatus == 'refunded' ||
+            order.paymentStatus == 'partially_refunded';
     }
   }
 
@@ -264,11 +416,17 @@ class _OrdersScreenState extends State<OrdersScreen> {
                     tooltip: 'Back',
                   ),
                   const SizedBox(width: 8),
-                  Text('Orders', style: Theme.of(context).textTheme.headlineSmall),
+                  Text(
+                    'Orders',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
                 ],
               ),
               const SizedBox(height: 16),
-              _FilterRow(selected: _filter, onSelected: (filter) => setState(() => _filter = filter)),
+              _FilterRow(
+                selected: _filter,
+                onSelected: (filter) => setState(() => _filter = filter),
+              ),
               const SizedBox(height: 16),
               Expanded(child: _buildBody(context)),
             ],
@@ -285,11 +443,14 @@ class _OrdersScreenState extends State<OrdersScreen> {
       if (_error != null) {
         return ErrorState(message: _error!, onRetry: _subscribe);
       }
-      return const Center(child: CircularProgressIndicator());
+      return SubscriptionLoadingState(onRetry: _subscribe);
     }
 
     if (orders.isEmpty) {
-      return const EmptyState(icon: Icons.receipt_long_outlined, message: 'No orders yet');
+      return const EmptyState(
+        icon: Icons.receipt_long_outlined,
+        message: 'No orders yet',
+      );
     }
 
     final filtered = orders.where(_matchesFilter).toList();
@@ -297,10 +458,14 @@ class _OrdersScreenState extends State<OrdersScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (_error != null) _ReconnectBanner(message: _error!, onRetry: _subscribe),
+        if (_error != null)
+          _ReconnectBanner(message: _error!, onRetry: _subscribe),
         Expanded(
           child: filtered.isEmpty
-              ? const EmptyState(icon: Icons.filter_alt_off_outlined, message: 'No orders match this filter')
+              ? const EmptyState(
+                  icon: Icons.filter_alt_off_outlined,
+                  message: 'No orders match this filter',
+                )
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   itemCount: filtered.length,
@@ -310,7 +475,12 @@ class _OrdersScreenState extends State<OrdersScreen> {
                       order: order,
                       isRefunding: _refunding.containsKey(order.id),
                       refundStatus: _refunding[order.id],
-                      refundEnabled: !anyRefundInProgress,
+                      refundEnabled:
+                          !anyRefundInProgress &&
+                          !_refundFiscalIssues.contains(order.id),
+                      hasRefundFiscalIssue: _refundFiscalIssues.contains(
+                        order.id,
+                      ),
                       onRefund: () => _refund(order),
                       isPrinting: _printingOrderIds.contains(order.id),
                       onPrint: () => _printReceipt(order),
@@ -343,7 +513,11 @@ class _FilterRow extends StatelessWidget {
       spacing: 8,
       children: [
         for (final filter in _OrderFilter.values)
-          ChoiceChip(label: Text(_labels[filter]!), selected: selected == filter, onSelected: (_) => onSelected(filter)),
+          ChoiceChip(
+            label: Text(_labels[filter]!),
+            selected: selected == filter,
+            onSelected: (_) => onSelected(filter),
+          ),
       ],
     );
   }
@@ -367,7 +541,12 @@ class _ReconnectBanner extends StatelessWidget {
             Icon(Icons.cloud_off, size: 18, color: scheme.onErrorContainer),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(message, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onErrorContainer)),
+              child: Text(
+                message,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.onErrorContainer),
+              ),
             ),
             TextButton(onPressed: onRetry, child: const Text('Retry')),
           ],
@@ -383,6 +562,7 @@ class _OrderCard extends StatelessWidget {
     required this.isRefunding,
     required this.refundStatus,
     required this.refundEnabled,
+    required this.hasRefundFiscalIssue,
     required this.onRefund,
     required this.isPrinting,
     required this.onPrint,
@@ -392,11 +572,13 @@ class _OrderCard extends StatelessWidget {
   final bool isRefunding;
   final PaymentStatusUpdate? refundStatus;
   final bool refundEnabled;
+  final bool hasRefundFiscalIssue;
   final VoidCallback onRefund;
   final bool isPrinting;
   final VoidCallback onPrint;
 
-  String _formatCents(int cents) => '${(cents / 100).toStringAsFixed(2)} $_currency';
+  String _formatCents(int cents) =>
+      '${(cents / 100).toStringAsFixed(2)} $_currency';
 
   static const _months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
@@ -469,6 +651,10 @@ class _OrderCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final charge = order.latestCharge?.transaction;
+    // SKVFS 2014:9 Ch.6 §3 permits at most one receipt copy — the server
+    // already enforces this (posReceipts.ts's requestCopy), this just
+    // surfaces it proactively instead of only after a rejected tap.
+    final hasReceiptCopy = order.latestCharge?.hasReceiptCopy ?? false;
     final failure = order.latestFailure;
     final statusColor = _statusColor(context);
 
@@ -487,7 +673,9 @@ class _OrderCard extends StatelessWidget {
                     order.dailyOrderNumber != null
                         ? '#${order.dailyOrderNumber} · ${order.displayId} · ${_formatTimestamp(order.placedAt)}'
                         : '${order.displayId} · ${_formatTimestamp(order.placedAt)}',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -501,24 +689,38 @@ class _OrderCard extends StatelessWidget {
                 child: Row(
                   children: [
                     Expanded(
-                      child: Text('${item.quantity}× ${item.name}', style: Theme.of(context).textTheme.bodyMedium),
+                      child: Text(
+                        '${item.quantity}× ${item.name}',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
                     ),
-                    Text(_formatCents(item.subtotalCents), style: Theme.of(context).textTheme.bodyMedium),
+                    Text(
+                      _formatCents(item.subtotalCents),
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                   ],
                 ),
               ),
             if (charge?.cardScheme != null) ...[
               const SizedBox(height: 4),
               Text(
-                [charge!.cardScheme, if (charge.partialPan != null) '•••• ${charge.partialPan}'].join(' '),
+                [
+                  charge!.cardScheme,
+                  if (charge.partialPan != null) '•••• ${charge.partialPan}',
+                ].join(' '),
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
             if (failure != null) ...[
               const SizedBox(height: 4),
               Text(
-                friendlySoftPayMessage(failure.failureMessage ?? 'Payment failed'),
-                style: TextStyle(color: scheme.error, fontWeight: FontWeight.w600),
+                friendlySoftPayMessage(
+                  failure.failureMessage ?? 'Payment failed',
+                ),
+                style: TextStyle(
+                  color: scheme.error,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ],
             if (order.refundedCents > 0) ...[
@@ -532,16 +734,28 @@ class _OrderCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text('Total', style: Theme.of(context).textTheme.titleMedium),
-                Text(_formatCents(order.totalCents), style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  _formatCents(order.totalCents),
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
               ],
             ),
             if (isRefunding) ...[
               const SizedBox(height: 12),
               Row(
                 children: [
-                  const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
                   const SizedBox(width: 8),
-                  Expanded(child: Text(_refundStageLabel(), style: Theme.of(context).textTheme.bodySmall)),
+                  Expanded(
+                    child: Text(
+                      _refundStageLabel(),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
                 ],
               ),
             ] else if (order.canRefund || charge != null) ...[
@@ -552,12 +766,20 @@ class _OrderCard extends StatelessWidget {
                     isPrinting
                         ? const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 12),
-                            child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
                           )
                         : OutlinedButton.icon(
-                            onPressed: onPrint,
+                            onPressed: hasReceiptCopy ? null : onPrint,
                             icon: const Icon(Icons.print_outlined, size: 18),
-                            label: const Text('Print receipt'),
+                            label: Text(
+                              hasReceiptCopy
+                                  ? 'Copy already printed'
+                                  : 'Print receipt',
+                            ),
                           ),
                   if (order.canRefund) ...[
                     const SizedBox(width: 12),
@@ -569,6 +791,27 @@ class _OrderCard extends StatelessWidget {
                   ],
                 ],
               ),
+              if (hasRefundFiscalIssue) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Refund fiscal receipt failed — needs manual follow-up',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ],
         ),
@@ -587,10 +830,16 @@ class _StatusTag extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(color: color.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+      ),
       child: Text(
         label,
-        style: Theme.of(context).textTheme.labelMedium?.copyWith(color: color, fontWeight: FontWeight.w700),
+        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+          color: color,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }

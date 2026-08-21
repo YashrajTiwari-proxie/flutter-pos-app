@@ -43,6 +43,11 @@ String friendlyErrorMessage(Object error, {required String action}) {
 /// actually seen in practice - so an uncommon failure still gets a real sentence instead of
 /// falling through to the generic SCREAMING_SNAKE_CASE humanizer below.
 const _knownSoftPayMessages = {
+  // The SDK's own generic failure - a real transaction attempt that came back declined for a
+  // reason it doesn't classify further (not a timeout/incomplete/cancellation, so this app's own
+  // recordPaymentFailure path applies - see employee_terminal_screen.dart's SoftPayException
+  // catch). Worded as "try again" since this is a clean decline, not an ambiguous outcome.
+  'SoftPay charge failed': 'Payment could not be processed - please try again',
   // This app's own client-side watchdog (see SoftPayService), not an SDK-reported code - the
   // native call itself never returned in time. Same ambiguity as TRANSACTION_INCOMPLETE below:
   // the charge may have actually gone through on the terminal even though this app never heard
@@ -220,6 +225,72 @@ class ErrorState extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Shows a spinner while waiting on a live Convex subscription's first value. If the underlying
+/// client is silently reconnecting in the background (no `onError` fired, but no `onUpdate`
+/// either — e.g. a genuine network black-hole, not a clean failure), a bare spinner would spin
+/// forever with no user-visible way out. After [timeout] with neither, this swaps to the same
+/// manual retry affordance [ErrorState] uses instead of waiting indefinitely. Tapping retry resets
+/// the timer and shows the spinner again, rather than immediately re-showing "still connecting".
+///
+/// Use in place of `const Center(child: CircularProgressIndicator())` for any screen's initial
+/// "waiting on the first subscription value" state — never for the timed-out
+/// [ErrorState]-via-`onError` branch, which already has its own real message.
+class SubscriptionLoadingState extends StatefulWidget {
+  const SubscriptionLoadingState({
+    super.key,
+    required this.onRetry,
+    this.timeout = const Duration(seconds: 12),
+  });
+
+  final VoidCallback onRetry;
+  final Duration timeout;
+
+  @override
+  State<SubscriptionLoadingState> createState() =>
+      _SubscriptionLoadingStateState();
+}
+
+class _SubscriptionLoadingStateState extends State<SubscriptionLoadingState> {
+  bool _timedOut = false;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTimer();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _startTimer() {
+    _timer?.cancel();
+    _timer = Timer(widget.timeout, () {
+      if (mounted) setState(() => _timedOut = true);
+    });
+  }
+
+  void _handleRetry() {
+    setState(() => _timedOut = false);
+    _startTimer();
+    widget.onRetry();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_timedOut) {
+      return ErrorState(
+        message: 'Still connecting — check your connection and try again.',
+        onRetry: _handleRetry,
+      );
+    }
+    return const Center(child: CircularProgressIndicator());
   }
 }
 

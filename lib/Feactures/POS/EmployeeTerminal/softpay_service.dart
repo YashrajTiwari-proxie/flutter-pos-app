@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/services.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 
 import 'softpay_models.dart';
 
@@ -65,17 +66,25 @@ class SoftPayService {
           })
           .timeout(_transactionTimeout);
       return TransactionResult.fromMap(result!);
-    } on PlatformException catch (e) {
+    } on PlatformException catch (e, stackTrace) {
       final details = e.details;
       final detailedCode = details is Map
           ? (details['detailedCode'] as num?)?.toInt()
           : null;
+      await _reportFailure(operation: 'charge', code: e.code, detailedCode: detailedCode, stackTrace: stackTrace);
       throw SoftPayException(
         code: e.code,
         message: e.message ?? 'Unknown SoftPay error',
         detailedCode: detailedCode,
       );
-    } on TimeoutException {
+    } on TimeoutException catch (_, stackTrace) {
+      await _reportFailure(operation: 'charge', code: 'CLIENT_TIMEOUT', detailedCode: null, stackTrace: stackTrace);
+      // Our own watchdog gave up waiting, but the native side's coroutine job is still running
+      // and holding `currentJob` - without this, every subsequent charge/refund on this device
+      // would fail with "BUSY" until the app is force-restarted. Best-effort: if this also times
+      // out/fails, there's nothing further to do here (same reasoning as cancelCharge()'s own doc
+      // comment on its short timeout).
+      unawaited(cancelCharge());
       throw const SoftPayException(
         code: 'CLIENT_TIMEOUT',
         message: 'The payment terminal did not respond in time',
@@ -100,22 +109,48 @@ class SoftPayService {
           })
           .timeout(_transactionTimeout);
       return TransactionResult.fromMap(result!);
-    } on PlatformException catch (e) {
+    } on PlatformException catch (e, stackTrace) {
       final details = e.details;
       final detailedCode = details is Map
           ? (details['detailedCode'] as num?)?.toInt()
           : null;
+      await _reportFailure(operation: 'refund', code: e.code, detailedCode: detailedCode, stackTrace: stackTrace);
       throw SoftPayException(
         code: e.code,
         message: e.message ?? 'Unknown SoftPay error',
         detailedCode: detailedCode,
       );
-    } on TimeoutException {
+    } on TimeoutException catch (_, stackTrace) {
+      await _reportFailure(operation: 'refund', code: 'CLIENT_TIMEOUT', detailedCode: null, stackTrace: stackTrace);
+      // See charge()'s identical call for why this is needed.
+      unawaited(cancelCharge());
       throw const SoftPayException(
         code: 'CLIENT_TIMEOUT',
         message: 'The payment terminal did not respond in time',
       );
     }
+  }
+
+  // 'CANCELLED' is the SDK's code for a deliberate staff/customer-pressed cancel (see
+  // SoftPayPlugin.kt's cancelCharge/cancelRefund `result.error("CANCELLED", ...)`) - expected,
+  // routine, not worth Sentry noise. Everything else (declines, CANCELLED_AUTO terminal
+  // auto-cancels, technical errors, our own client-side timeout) is unexpected enough to track.
+  Future<void> _reportFailure({
+    required String operation,
+    required String code,
+    required int? detailedCode,
+    required StackTrace stackTrace,
+  }) async {
+    if (code == 'CANCELLED') return;
+    await Sentry.captureException(
+      SoftPayException(code: code, message: 'SoftPay $operation failed', detailedCode: detailedCode),
+      stackTrace: stackTrace,
+      withScope: (scope) {
+        scope.setTag('softpay.operation', operation);
+        scope.setTag('softpay.code', code);
+        if (detailedCode != null) scope.setTag('softpay.detailedCode', detailedCode.toString());
+      },
+    );
   }
 
   /// Cancels whichever operation (charge or refund) is currently in flight. Deliberately a short
